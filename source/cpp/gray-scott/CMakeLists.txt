@@ -1,38 +1,40 @@
-#------------------------------------------------------------------------------#
-# Distributed under the OSI-approved Apache License, Version 2.0.  See
-# accompanying file Copyright.txt for details.
-#------------------------------------------------------------------------------#
+cmake_minimum_required(VERSION 3.22)
+project(ADIOS2GrayScott)
 
-add_executable(adios2-gray-scott
-  simulation/main.cpp
-  simulation/gray-scott.cpp
-  simulation/settings.cpp
-  simulation/writer.cpp
-  simulation/restart.cpp
+# Find required packages
+find_package(MPI REQUIRED)
+find_package(adios2 REQUIRED)
+
+# Set C++ standard
+set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# Add executable for gray-scott simulation
+add_executable(adios2-gray-scott 
+    simulation/main.cpp
+    simulation/gray-scott.cpp
+    simulation/settings.cpp
+    simulation/writer.cpp
+    simulation/restart.cpp
 )
-target_link_libraries(adios2-gray-scott adios2::adios2 MPI::MPI_C)
-install(TARGETS adios2-gray-scott 
-        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
-add_executable(adios2-pdf-calc analysis/pdf-calc.cpp)
-target_link_libraries(adios2-pdf-calc adios2::adios2 MPI::MPI_C)
-install(TARGETS adios2-pdf-calc 
-        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}) 
+# Link libraries for gray-scott
+target_link_libraries(adios2-gray-scott 
+    adios2::adios2
+    MPI::MPI_CXX
+)
 
-install(FILES "adios2.xml" "adios2-inline-plugin.xml" "adios2-fides-staging.xml"
-                           "visit-bp4.session" "visit-bp4.session.gui" 
-                           "visit-sst.session" "visit-sst.session.gui"                  
-                           "simulation/settings-files.json"
-                           "simulation/settings-staging.json"
-                           "simulation/settings-inline.json"
-                           "plot/decomp.py" "plot/gsplot.py" "plot/pdfplot.py"
-                           "README.md" 
-        DESTINATION ${CMAKE_INSTALL_PREFIX}/share/adios2-examples/gray-scott) 
+# Add executable for pdf-calc analysis
+add_executable(adios2-pdf-calc 
+    analysis/pdf-calc.cpp
+)
 
-install(DIRECTORY "catalyst"
-        DESTINATION ${CMAKE_INSTALL_PREFIX}/share/adios2-examples/gray-scott) 
+# Link libraries for pdf-calc
+target_link_libraries(adios2-pdf-calc 
+    adios2::adios2
+    MPI::MPI_CXX
+)
 
-
-install(PROGRAMS "cleanup.sh" 
-        DESTINATION ${CMAKE_INSTALL_PREFIX}/share/adios2-examples/gray-scott) 
-
+# Include MPI headers
+target_include_directories(adios2-gray-scott PRIVATE ${MPI_INCLUDE_PATH})
+target_include_directories(adios2-pdf-calc PRIVATE ${MPI_INCLUDE_PATH})

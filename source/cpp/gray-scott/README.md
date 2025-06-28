@@ -10,6 +10,13 @@ v_t = Dv * (v_xx + v_yy + v_zz) + u * v^2 - (F + k) * v
 
 ## How to run
 
+$ mpirun -n 2 ./build/adios2-pdf-calc gs.bp results/my_analysis.bp
+# Run with performance measurements
+$ mpirun -n 4 ./build/adios2-pdf-calc gs.bp output.bp [nbins] [write_input]
+
+# Run automated performance tests
+$ ./run_performance_tests.sh
+
 Make sure MPI and ADIOS2 are installed and that the `PYTHONPATH` includes the ADIOS2 package.
 Make sure the adios2-examples/bin installation directory is in the `PATH` (conda and spack installations should take care of this aspect).
 

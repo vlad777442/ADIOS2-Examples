@@ -6,7 +6,7 @@
  * Norbert Podhorszki, pnorbert@ornl.gov
  *
  */
-
+#include <mpi.h>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -15,8 +15,44 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <iomanip>
 
 #include "adios2.h"
+
+// Performance measurement structure
+struct PerformanceMetrics {
+    double total_time = 0.0;
+    double io_read_time = 0.0;
+    double io_write_time = 0.0;
+    double computation_time = 0.0;
+    double initialization_time = 0.0;
+    size_t total_steps = 0;
+    size_t total_data_read_mb = 0;
+    size_t total_data_written_mb = 0;
+    
+    void print_summary(int rank, int comm_size) {
+        if (rank == 0) {
+            std::cout << "\n=== Performance Summary ===" << std::endl;
+            std::cout << std::fixed << std::setprecision(3);
+            std::cout << "Total execution time:     " << total_time << " seconds" << std::endl;
+            std::cout << "Initialization time:      " << initialization_time << " seconds" << std::endl;
+            std::cout << "I/O read time:            " << io_read_time << " seconds" << std::endl;
+            std::cout << "Computation time:         " << computation_time << " seconds" << std::endl;
+            std::cout << "I/O write time:           " << io_write_time << " seconds" << std::endl;
+            std::cout << "Total steps processed:    " << total_steps << std::endl;
+            std::cout << "Data read (MB):           " << total_data_read_mb << std::endl;
+            std::cout << "Data written (MB):        " << total_data_written_mb << std::endl;
+            std::cout << "Processes used:           " << comm_size << std::endl;
+            
+            if (total_steps > 0) {
+                std::cout << "Average time per step:    " << (total_time - initialization_time) / total_steps << " seconds" << std::endl;
+                std::cout << "Read throughput:          " << (total_data_read_mb / io_read_time) << " MB/s" << std::endl;
+                std::cout << "Write throughput:         " << (total_data_written_mb / io_write_time) << " MB/s" << std::endl;
+            }
+            std::cout << "===========================\n" << std::endl;
+        }
+    }
+};
 
 bool epsilon(double d) { return (d < 1.0e-20); }
 bool epsilon(float d) { return (d < 1.0e-20); }
@@ -113,6 +149,9 @@ void printUsage()
  */
 int main(int argc, char *argv[])
 {
+    // Start overall timing
+    auto start_total = std::chrono::high_resolution_clock::now();
+    
     int provided;
     MPI_Init_thread(&argc, &argv, MPI_THREAD_MULTIPLE, &provided);
     int rank, comm_size, wrank;
@@ -125,6 +164,9 @@ int main(int argc, char *argv[])
 
     MPI_Comm_rank(comm, &rank);
     MPI_Comm_size(comm, &comm_size);
+    
+    // Initialize performance metrics
+    PerformanceMetrics perf_metrics;
 
     if (argc < 3)
     {
@@ -182,6 +224,9 @@ int main(int argc, char *argv[])
     adios2::Variable<double> var_u_out, var_v_out;
 
     {
+        // Start initialization timing
+        auto start_init = std::chrono::high_resolution_clock::now();
+        
         // adios2 io object and engine init
         adios2::ADIOS ad("adios2.xml", comm);
 
@@ -205,11 +250,17 @@ int main(int argc, char *argv[])
             writer_io.Open(out_filename, adios2::Mode::Write, comm);
 
         bool shouldIWrite = (!rank || reader_io.EngineType() == "HDF5");
+        
+        // End initialization timing
+        auto end_init = std::chrono::high_resolution_clock::now();
+        perf_metrics.initialization_time = std::chrono::duration<double>(end_init - start_init).count();
 
         // read data per timestep
         int stepAnalysis = 0;
         while (true)
         {
+            // Start I/O read timing
+            auto start_read = std::chrono::high_resolution_clock::now();
 
             // Begin step
             adios2::StepStatus read_status =
@@ -305,12 +356,23 @@ int main(int argc, char *argv[])
 
             // End adios2 step
             reader.EndStep();
+            
+            // End I/O read timing and calculate data size
+            auto end_read = std::chrono::high_resolution_clock::now();
+            double read_time = std::chrono::duration<double>(end_read - start_read).count();
+            perf_metrics.io_read_time += read_time;
+            
+            // Calculate data size read (U + V arrays)
+            size_t data_size_bytes = (u.size() + v.size()) * sizeof(double);
+            perf_metrics.total_data_read_mb += data_size_bytes / (1024 * 1024);
 
             if (!rank)
             {
                 std::cout << "PDF Analysis step " << stepAnalysis
                           << " processing sim output step " << stepSimOut
-                          << " sim compute step " << simStep << std::endl;
+                          << " sim compute step " << simStep 
+                          << " (read time: " << std::fixed << std::setprecision(3) << read_time << "s)"
+                          << std::endl;
             }
 
             // HDF5 engine does not provide min/max. Let's calculate it
@@ -322,6 +384,9 @@ int main(int argc, char *argv[])
                 minmax_v = std::make_pair(*mmv.first, *mmv.second);
             }
 
+            // Start computation timing
+            auto start_compute = std::chrono::high_resolution_clock::now();
+            
             // Compute PDF
             std::vector<double> pdf_u;
             std::vector<double> bins_u;
@@ -332,6 +397,13 @@ int main(int argc, char *argv[])
             std::vector<double> bins_v;
             compute_pdf(v, shape, start1, count1, nbins, minmax_v.first,
                         minmax_v.second, pdf_v, bins_v);
+            
+            // End computation timing
+            auto end_compute = std::chrono::high_resolution_clock::now();
+            perf_metrics.computation_time += std::chrono::duration<double>(end_compute - start_compute).count();
+
+            // Start I/O write timing
+            auto start_write = std::chrono::high_resolution_clock::now();
 
             // write U, V, and their norms out
             writer.BeginStep();
@@ -349,12 +421,75 @@ int main(int argc, char *argv[])
                 writer.Put<double>(var_v_out, v.data());
             }
             writer.EndStep();
+            
+            // End I/O write timing and calculate data size written
+            auto end_write = std::chrono::high_resolution_clock::now();
+            perf_metrics.io_write_time += std::chrono::duration<double>(end_write - start_write).count();
+            
+            // Calculate data size written (PDF data + bins + optional input data)
+            size_t write_size_bytes = (pdf_u.size() + pdf_v.size()) * sizeof(double);
+            if (shouldIWrite) {
+                write_size_bytes += (bins_u.size() + bins_v.size()) * sizeof(double) + sizeof(int);
+            }
+            if (write_inputvars) {
+                write_size_bytes += (u.size() + v.size()) * sizeof(double);
+            }
+            perf_metrics.total_data_written_mb += write_size_bytes / (1024 * 1024);
+            
             ++stepAnalysis;
+            perf_metrics.total_steps = stepAnalysis;
         }
 
         // cleanup
         reader.Close();
         writer.Close();
+    }
+
+    // Calculate total execution time
+    auto end_total = std::chrono::high_resolution_clock::now();
+    perf_metrics.total_time = std::chrono::duration<double>(end_total - start_total).count();
+    
+    // Aggregate performance metrics across all processes
+    double total_times[5] = {perf_metrics.total_time, perf_metrics.initialization_time, 
+                           perf_metrics.io_read_time, perf_metrics.computation_time, 
+                           perf_metrics.io_write_time};
+    double max_times[5], min_times[5], avg_times[5];
+    size_t total_data[2] = {perf_metrics.total_data_read_mb, perf_metrics.total_data_written_mb};
+    size_t sum_data[2];
+    
+    MPI_Allreduce(total_times, max_times, 5, MPI_DOUBLE, MPI_MAX, comm);
+    MPI_Allreduce(total_times, min_times, 5, MPI_DOUBLE, MPI_MIN, comm);
+    MPI_Allreduce(total_times, avg_times, 5, MPI_DOUBLE, MPI_SUM, comm);
+    MPI_Allreduce(total_data, sum_data, 2, MPI_UNSIGNED_LONG, MPI_SUM, comm);
+    
+    // Calculate averages
+    for (int i = 0; i < 5; i++) {
+        avg_times[i] /= comm_size;
+    }
+    
+    // Print detailed performance summary
+    if (!rank) {
+        std::cout << "\n=== Detailed Performance Summary ===" << std::endl;
+        std::cout << std::fixed << std::setprecision(3);
+        std::cout << "Metric                    | Max      | Min      | Avg      |" << std::endl;
+        std::cout << "--------------------------|----------|----------|----------|" << std::endl;
+        std::cout << "Total execution time (s)  | " << std::setw(8) << max_times[0] << " | " << std::setw(8) << min_times[0] << " | " << std::setw(8) << avg_times[0] << " |" << std::endl;
+        std::cout << "Initialization time (s)   | " << std::setw(8) << max_times[1] << " | " << std::setw(8) << min_times[1] << " | " << std::setw(8) << avg_times[1] << " |" << std::endl;
+        std::cout << "I/O read time (s)         | " << std::setw(8) << max_times[2] << " | " << std::setw(8) << min_times[2] << " | " << std::setw(8) << avg_times[2] << " |" << std::endl;
+        std::cout << "Computation time (s)      | " << std::setw(8) << max_times[3] << " | " << std::setw(8) << min_times[3] << " | " << std::setw(8) << avg_times[3] << " |" << std::endl;
+        std::cout << "I/O write time (s)        | " << std::setw(8) << max_times[4] << " | " << std::setw(8) << min_times[4] << " | " << std::setw(8) << avg_times[4] << " |" << std::endl;
+        std::cout << "=====================================" << std::endl;
+        std::cout << "Total steps processed:    " << perf_metrics.total_steps << std::endl;
+        std::cout << "Total data read (MB):     " << sum_data[0] << std::endl;
+        std::cout << "Total data written (MB):  " << sum_data[1] << std::endl;
+        std::cout << "Processes used:           " << comm_size << std::endl;
+        
+        if (perf_metrics.total_steps > 0 && avg_times[2] > 0 && avg_times[4] > 0) {
+            std::cout << "Average time per step:    " << (avg_times[0] - avg_times[1]) / perf_metrics.total_steps << " seconds" << std::endl;
+            std::cout << "Read throughput:          " << (sum_data[0] / avg_times[2]) << " MB/s" << std::endl;
+            std::cout << "Write throughput:         " << (sum_data[1] / avg_times[4]) << " MB/s" << std::endl;
+        }
+        std::cout << "=====================================" << std::endl;
     }
 
     MPI_Barrier(comm);
