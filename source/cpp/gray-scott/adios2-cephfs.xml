@@ -1,0 +1,59 @@
+<?xml version="1.0"?>
+<adios-config>
+
+    <!--============================================
+           Configuration for Gray-Scott on CephFS
+        ============================================-->
+
+    <io name="SimulationOutput">
+        <engine type="BP5">
+            <!-- CephFS optimizations -->
+            <parameter key="NumAggregators" value="4"/>
+            <parameter key="AsyncWrite" value="true"/>
+            <parameter key="DataTransport" value="MPI"/>
+            
+            <!-- CephFS-optimized buffering (larger for network filesystem) -->
+            <parameter key="BufferSize" value="32MB"/>
+            <parameter key="MaxBufferSize" value="256MB"/>
+            
+            <!-- Collective I/O for better CephFS performance -->
+            <parameter key="CollectiveMetadata" value="true"/>
+            <parameter key="CollectiveOperations" value="true"/>
+            
+            <!-- CephFS-specific timeouts -->
+            <parameter key="OpenTimeoutSecs" value="120.0"/>
+            <parameter key="FlushOnEndStep" value="true"/>
+        </engine>
+    </io>
+
+    <!--===========================================
+           Configuration for PDF calc and PDF Plot
+        ===========================================-->
+
+    <io name="PDFAnalysisOutput">
+        <engine type="BP5">
+            <!-- Analysis output optimized for CephFS -->
+            <parameter key="NumAggregators" value="2"/>
+            <parameter key="AsyncWrite" value="true"/>
+            <parameter key="BufferSize" value="16MB"/>
+            <parameter key="CollectiveMetadata" value="true"/>
+            <parameter key="OpenTimeoutSecs" value="120.0"/>
+        </engine>
+    </io>
+
+    <!--================================================
+           Configuration for Gray-Scott (checkpointing)
+        ================================================-->
+
+    <io name="SimulationCheckpoint">
+        <engine type="BP5">
+            <!-- Checkpoint optimizations for CephFS -->
+            <parameter key="NumAggregators" value="2"/>
+            <parameter key="AsyncWrite" value="false"/>
+            <parameter key="BufferSize" value="64MB"/>
+            <parameter key="CollectiveMetadata" value="true"/>
+            <parameter key="FlushOnEndStep" value="true"/>
+        </engine>
+    </io>
+
+</adios-config>
