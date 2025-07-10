@@ -1,0 +1,21 @@
+{
+    "L": 64,
+    "Du": 0.2,
+    "Dv": 0.1,
+    "F": 0.01,
+    "k": 0.05,
+    "dt": 2.0,
+    "plotgap": 10,
+    "steps": 50,
+    "noise": 0.0000001,
+    "output": "/mnt/rbd/gray-scott/gs-rbd.bp",
+    "checkpoint": true,
+    "checkpoint_freq": 700,
+    "checkpoint_output": "/mnt/rbd/gray-scott/checkpoints/ckpt-rbd.bp",
+    "restart": false,
+    "restart_input": "/mnt/rbd/gray-scott/checkpoints/ckpt-rbd.bp",
+    "adios_config": "adios2-rbd.xml",
+    "adios_span": false,
+    "adios_memory_selection": false,
+    "mesh_type": "image"
+}

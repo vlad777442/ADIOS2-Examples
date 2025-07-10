@@ -1,0 +1,69 @@
+<?xml version="1.0"?>
+<adios-config>
+
+    <!--============================================
+           Configuration for Gray-Scott on RBD
+        ============================================-->
+
+    <io name="SimulationOutput">
+        <engine type="BP5">
+            <!-- RBD optimizations (block device, lower latency) -->
+            <parameter key="NumAggregators" value="8"/>
+            <parameter key="AsyncWrite" value="true"/>
+            <parameter key="DataTransport" value="MPI"/>
+            
+            <!-- RBD-optimized buffering (smaller buffers for lower latency) -->
+            <parameter key="BufferSize" value="16MB"/>
+            <parameter key="MaxBufferSize" value="128MB"/>
+            
+            <!-- Collective I/O optimized for block device -->
+            <parameter key="CollectiveMetadata" value="true"/>
+            <parameter key="CollectiveOperations" value="true"/>
+            
+            <!-- RBD-specific optimizations -->
+            <parameter key="OpenTimeoutSecs" value="60.0"/>
+            <parameter key="FlushOnEndStep" value="true"/>
+            <parameter key="DirectIO" value="false"/>
+            
+            <!-- Block device specific settings -->
+            <parameter key="WriteMode" value="Append"/>
+            <parameter key="MetadataRatio" value="0.1"/>
+        </engine>
+    </io>
+
+    <!--===========================================
+           Configuration for PDF calc and PDF Plot
+        ===========================================-->
+
+    <io name="PDFAnalysisOutput">
+        <engine type="BP5">
+            <!-- Analysis output optimized for RBD -->
+            <parameter key="NumAggregators" value="4"/>
+            <parameter key="AsyncWrite" value="true"/>
+            <parameter key="BufferSize" value="8MB"/>
+            <parameter key="CollectiveMetadata" value="true"/>
+            <parameter key="OpenTimeoutSecs" value="60.0"/>
+            <parameter key="FlushOnEndStep" value="true"/>
+        </engine>
+    </io>
+
+    <!--================================================
+           Configuration for Gray-Scott (checkpointing)
+        ================================================-->
+
+    <io name="SimulationCheckpoint">
+        <engine type="BP5">
+            <!-- Checkpoint optimizations for RBD -->
+            <parameter key="NumAggregators" value="4"/>
+            <parameter key="AsyncWrite" value="false"/>
+            <parameter key="BufferSize" value="32MB"/>
+            <parameter key="CollectiveMetadata" value="true"/>
+            <parameter key="FlushOnEndStep" value="true"/>
+            
+            <!-- RBD checkpoint-specific settings -->
+            <parameter key="DirectIO" value="false"/>
+            <parameter key="WriteMode" value="Append"/>
+        </engine>
+    </io>
+
+</adios-config>
