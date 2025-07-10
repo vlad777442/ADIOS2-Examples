@@ -94,8 +94,213 @@ Both programs now provide detailed performance breakdowns:
 
 This setup allows comprehensive testing of CephFS performance under different I/O patterns and data loads!
 
+---
 
+## 🔥 Gray-Scott RBD Performance Testing Guide
 
+### Quick Start Commands
+
+```bash
+./run_rbd.sh sim        # Run Gray-Scott simulation (writes BP data to RBD)
+./run_rbd.sh analysis   # Run PDF analysis (reads BP data, writes analysis results)
+./run_rbd.sh full       # Run complete workflow (simulation + analysis)
+./run_rbd.sh status     # Check RBD data status and file sizes
+./run_rbd.sh clean      # Clean RBD data directories
+```
+
+### Typical Workflow
+
+```bash
+cd /users/vlad777/research/ADIOS2-Examples/source/cpp/gray-scott
+
+# 1. Run complete workflow on RBD (simulation + analysis)
+./run_rbd.sh full 8 2000 200
+
+# 2. Or run steps individually:
+./run_rbd.sh sim 8 2000        # Simulation only
+./run_rbd.sh analysis 8 200    # Analysis only
+
+# 3. Check performance results
+./run_rbd.sh logs summary      # View performance summaries
+./run_rbd.sh status           # Check storage usage
+```
+
+---
+
+## 💾 RBD Setup Instructions
+
+### 1. Create Ceph RBD Pool and Image
+
+```bash
+# Create a new pool for RBD
+sudo ceph osd pool create rbd_pool 128 128
+
+# Initialize the pool for RBD
+sudo rbd pool init rbd_pool
+
+# Create an RBD image (20GB size)
+sudo rbd create --size 20G rbd_pool/gray-scott-rbd
+```
+
+### 2. Map and Mount RBD Device
+
+```bash
+# Map RBD image to a block device
+sudo rbd map rbd_pool/gray-scott-rbd
+
+# Format the RBD device (first time only)
+sudo mkfs.ext4 /dev/rbd0
+
+# Create mount point
+sudo mkdir -p /mnt/rbd
+
+# Mount the RBD device
+sudo mount /dev/rbd0 /mnt/rbd
+
+# Set proper permissions
+sudo chown -R $USER:$USER /mnt/rbd
+sudo chmod 755 /mnt/rbd
+```
+
+### 3. Verify RBD Setup
+
+```bash
+# Check RBD mapping
+rbd showmapped
+
+# Check mount status
+df -h /mnt/rbd
+
+# Test write access
+touch /mnt/rbd/test_file && rm /mnt/rbd/test_file
+```
+
+---
+
+## 🚀 RBD Performance Testing Commands
+
+### 1. Complete Workflow (Recommended)
+```bash
+./run_rbd.sh full [processes] [steps] [bins]
+```
+**Examples:**
+```bash
+./run_rbd.sh full 4 1000 200    # 4 processes, 1000 steps, 200 bins
+./run_rbd.sh full 8 2000 100    # 8 processes, 2000 steps, 100 bins
+./run_rbd.sh full 2 500 50      # Quick test: 2 processes, 500 steps, 50 bins
+```
+
+### 2. Simulation Only (Write-Heavy)
+```bash
+./run_rbd.sh sim [processes] [steps]
+```
+**Examples:**
+```bash
+./run_rbd.sh sim 4 1000    # 4 processes, 1000 steps
+./run_rbd.sh sim 8 2000    # 8 processes, 2000 steps
+```
+- **Tests**: RBD write performance during simulation
+- **Measures**: Write throughput, I/O timing, data volume to RBD
+- **Output**: Comprehensive performance summary with RBD metrics
+
+### 3. Analysis Only (Read + Write)
+```bash
+./run_rbd.sh analysis [processes] [bins]
+```
+**Examples:**
+```bash
+./run_rbd.sh analysis 4 100    # 4 processes, 100 bins
+./run_rbd.sh analysis 8 200    # 8 processes, 200 bins
+```
+- **Tests**: RBD read performance + analysis write performance
+- **Measures**: Read throughput, data processing rate, write efficiency
+- **Output**: Data reduction ratios and processing statistics
+
+---
+
+## 📊 RBD Performance Features
+
+The `run_rbd.sh` script provides advanced performance monitoring:
+
+### Real-time Monitoring
+- **⏱️ Timing**: Real-time execution monitoring every 3-5 seconds
+- **🖥️ Resources**: CPU usage, memory consumption tracking
+- **💾 Storage**: RBD usage growth, file creation monitoring
+- **📈 I/O**: Block device read/write statistics (requires `iostat`)
+
+### Automatic Performance Summaries
+- **📋 Summary Files**: Auto-generated performance reports in `/tmp/`
+- **📄 Preview**: Immediate display of performance results after completion
+- **📊 Metrics**: Throughput (MB/s), steps/sec, bins/sec, data reduction ratios
+- **💡 Efficiency**: Storage efficiency, memory usage, processing rates
+
+### Performance Log Commands
+```bash
+./run_rbd.sh logs sim        # View simulation performance logs
+./run_rbd.sh logs analysis   # View analysis performance logs  
+./run_rbd.sh logs summary    # List all performance summaries
+./run_rbd.sh metrics         # Show current RBD performance overview
+```
+
+---
+
+## 🎯 RBD vs CephFS Performance Comparison
+
+### Run Comparative Tests
+```bash
+./run_rbd.sh compare 4 1000    # Compare RBD vs CephFS performance
+```
+
+### Key Differences
+| Storage Type | Best For | Advantages |
+|-------------|----------|------------|
+| **RBD (Block)** | High I/O throughput, databases | Lower latency, better for random I/O |
+| **CephFS (File)** | Shared access, POSIX compliance | Multi-client access, easier management |
+
+---
+
+## 🛠️ RBD Prerequisites
+
+Before running RBD tests, ensure:
+
+1. **Ceph Cluster**: Running Ceph cluster with RBD support
+2. **RBD Tools**: `rbd` command-line tools installed
+3. **Permissions**: User has sudo access for RBD operations
+4. **Mount Point**: `/mnt/rbd/` exists and is writable
+5. **ADIOS2**: Built with Gray-Scott examples
+6. **Tools**: `iostat` recommended for I/O monitoring, `bc` for calculations
+
+---
+
+## 🔧 RBD Troubleshooting
+
+### Common Issues
+
+**RBD not mounted:**
+```bash
+# Check if RBD is mapped
+rbd showmapped
+
+# Remap and mount if needed
+sudo rbd map rbd_pool/gray-scott-rbd
+sudo mount /dev/rbd0 /mnt/rbd
+```
+
+**Permission errors:**
+```bash
+# Fix permissions
+sudo chown -R $USER:$USER /mnt/rbd
+sudo chmod 755 /mnt/rbd
+```
+
+**Performance monitoring missing:**
+```bash
+# Install iostat for I/O monitoring
+sudo apt-get install sysstat  # Ubuntu/Debian
+sudo yum install sysstat       # CentOS/RHEL
+```
+
+---
 
 # ADIOS2-Examples gray-scott
 
