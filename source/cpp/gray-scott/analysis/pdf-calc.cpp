@@ -11,11 +11,13 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <string>
 #include <thread>
 #include <iomanip>
+#include <vector>
 
 #include "adios2.h"
 
@@ -29,6 +31,13 @@ struct PerformanceMetrics {
     size_t total_steps = 0;
     size_t total_data_read_mb = 0;
     size_t total_data_written_mb = 0;
+    
+    // Per-step timing for CSV output
+    std::vector<double> step_read_times;
+    std::vector<double> step_write_times;
+    std::vector<double> step_compute_times;
+    std::vector<size_t> step_data_read_bytes;
+    std::vector<size_t> step_data_written_bytes;
     
     void print_summary(int rank, int comm_size) {
         if (rank == 0) {
@@ -361,10 +370,12 @@ int main(int argc, char *argv[])
             auto end_read = std::chrono::high_resolution_clock::now();
             double read_time = std::chrono::duration<double>(end_read - start_read).count();
             perf_metrics.io_read_time += read_time;
+            perf_metrics.step_read_times.push_back(read_time);
             
             // Calculate data size read (U + V arrays)
             size_t data_size_bytes = (u.size() + v.size()) * sizeof(double);
             perf_metrics.total_data_read_mb += data_size_bytes / (1024 * 1024);
+            perf_metrics.step_data_read_bytes.push_back(data_size_bytes);
 
             if (!rank)
             {
@@ -400,7 +411,9 @@ int main(int argc, char *argv[])
             
             // End computation timing
             auto end_compute = std::chrono::high_resolution_clock::now();
-            perf_metrics.computation_time += std::chrono::duration<double>(end_compute - start_compute).count();
+            double compute_time = std::chrono::duration<double>(end_compute - start_compute).count();
+            perf_metrics.computation_time += compute_time;
+            perf_metrics.step_compute_times.push_back(compute_time);
 
             // Start I/O write timing
             auto start_write = std::chrono::high_resolution_clock::now();
@@ -424,7 +437,9 @@ int main(int argc, char *argv[])
             
             // End I/O write timing and calculate data size written
             auto end_write = std::chrono::high_resolution_clock::now();
-            perf_metrics.io_write_time += std::chrono::duration<double>(end_write - start_write).count();
+            double write_time = std::chrono::duration<double>(end_write - start_write).count();
+            perf_metrics.io_write_time += write_time;
+            perf_metrics.step_write_times.push_back(write_time);
             
             // Calculate data size written (PDF data + bins + optional input data)
             size_t write_size_bytes = (pdf_u.size() + pdf_v.size()) * sizeof(double);
@@ -435,6 +450,7 @@ int main(int argc, char *argv[])
                 write_size_bytes += (u.size() + v.size()) * sizeof(double);
             }
             perf_metrics.total_data_written_mb += write_size_bytes / (1024 * 1024);
+            perf_metrics.step_data_written_bytes.push_back(write_size_bytes);
             
             ++stepAnalysis;
             perf_metrics.total_steps = stepAnalysis;
@@ -490,6 +506,48 @@ int main(int argc, char *argv[])
             std::cout << "Write throughput:         " << (sum_data[1] / avg_times[4]) << " MB/s" << std::endl;
         }
         std::cout << "=====================================" << std::endl;
+        
+        // Output per-step throughput CSV for plotting
+        if (!perf_metrics.step_read_times.empty())
+        {
+            std::string csv_filename = out_filename + "_throughput.csv";
+            std::ofstream csv_file(csv_filename);
+            if (csv_file.is_open())
+            {
+                csv_file << "step,read_time_sec,compute_time_sec,write_time_sec,data_read_mb,data_written_mb,read_throughput_mb_s,write_throughput_mb_s,cumulative_read_time,cumulative_write_time\n";
+                
+                double cumulative_read_time = 0.0;
+                double cumulative_write_time = 0.0;
+                
+                for (size_t i = 0; i < perf_metrics.step_read_times.size(); ++i)
+                {
+                    double read_time = perf_metrics.step_read_times[i];
+                    double compute_time = perf_metrics.step_compute_times[i];
+                    double write_time = perf_metrics.step_write_times[i];
+                    double data_read_mb = perf_metrics.step_data_read_bytes[i] / (1024.0 * 1024.0);
+                    double data_written_mb = perf_metrics.step_data_written_bytes[i] / (1024.0 * 1024.0);
+                    double read_throughput = (read_time > 0) ? (data_read_mb / read_time) : 0.0;
+                    double write_throughput = (write_time > 0) ? (data_written_mb / write_time) : 0.0;
+                    
+                    cumulative_read_time += read_time;
+                    cumulative_write_time += write_time;
+                    
+                    csv_file << std::fixed << std::setprecision(6)
+                             << (i + 1) << ","
+                             << read_time << ","
+                             << compute_time << ","
+                             << write_time << ","
+                             << data_read_mb << ","
+                             << data_written_mb << ","
+                             << read_throughput << ","
+                             << write_throughput << ","
+                             << cumulative_read_time << ","
+                             << cumulative_write_time << "\n";
+                }
+                csv_file.close();
+                std::cout << "\n📊 Per-step throughput data saved to: " << csv_filename << std::endl;
+            }
+        }
     }
 
     MPI_Barrier(comm);

@@ -328,6 +328,43 @@ int main(int argc, char **argv)
     // Print performance summary
     print_performance_summary(perf_metrics, rank, procs, settings);
 
+    // Output per-step throughput CSV for plotting
+    if (rank == 0 && !perf_metrics.step_write_times.empty())
+    {
+        std::string csv_filename = settings.output + "_throughput.csv";
+        std::ofstream csv_file(csv_filename);
+        if (csv_file.is_open())
+        {
+            csv_file << "write_number,step,write_time_sec,data_size_mb,throughput_mb_s,cumulative_time_sec,cumulative_data_mb\n";
+            
+            double cumulative_time = 0.0;
+            double cumulative_data = 0.0;
+            
+            for (size_t i = 0; i < perf_metrics.step_write_times.size(); ++i)
+            {
+                double write_time = perf_metrics.step_write_times[i];
+                double data_size_mb = perf_metrics.step_data_sizes_mb[i];
+                double throughput = (write_time > 0) ? (data_size_mb / write_time) : 0.0;
+                
+                cumulative_time += write_time;
+                cumulative_data += data_size_mb;
+                
+                int step_num = (i + 1) * settings.plotgap;
+                
+                csv_file << std::fixed << std::setprecision(6)
+                         << (i + 1) << ","
+                         << step_num << ","
+                         << write_time << ","
+                         << data_size_mb << ","
+                         << throughput << ","
+                         << cumulative_time << ","
+                         << cumulative_data << "\n";
+            }
+            csv_file.close();
+            std::cout << "\n📊 Per-step throughput data saved to: " << csv_filename << std::endl;
+        }
+    }
+
 #ifdef ENABLE_TIMERS
     log << "total\t" << timer_total.elapsed() << "\t" << timer_compute.elapsed()
         << "\t" << timer_write.elapsed() << std::endl;
