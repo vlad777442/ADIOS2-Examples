@@ -90,6 +90,10 @@ def parse_args():
                    help="Performance sampling interval in seconds (default: 3)")
     p.add_argument("--no-restore", action="store_true",
                    help="Leave OSD stopped/out after experiment")
+    p.add_argument("--rbd-mount", default=RBD_MOUNT, metavar="DIR",
+                   help=f"Mount point of the RBD device to monitor (default: {RBD_MOUNT})")
+    p.add_argument("--no-fault", action="store_true",
+                   help="Run analysis only, no OSD fault injection (baseline/control run)")
     p.add_argument("--verbose", "-v", action="store_true")
     return p.parse_args()
 
@@ -106,8 +110,8 @@ def preflight_check(args):
     elif "HEALTH_ERR" in r.stdout:
         errors.append(f"Cluster not healthy: {r.stdout.strip()}")
 
-    if not os.path.ismount(RBD_MOUNT):
-        errors.append(f"{RBD_MOUNT} is not mounted")
+    if not os.path.ismount(args.rbd_mount):
+        errors.append(f"{args.rbd_mount} is not mounted")
 
     if not os.path.exists(args.input):
         errors.append(
@@ -198,7 +202,7 @@ def _cpu_and_mem():
     return 0.0, mem_mb
 
 
-def perf_monitor(csv_path, rbd_device, stop_event, interval=3.0):
+def perf_monitor(csv_path, rbd_device, stop_event, interval=3.0, rbd_mount=RBD_MOUNT):
     """
     Thread target: samples CPU/mem/IO every `interval` seconds.
     Writes a CSV compatible with plot_io.py:
@@ -224,7 +228,7 @@ def perf_monitor(csv_path, rbd_device, stop_event, interval=3.0):
         while not stop_event.is_set():
             ts = time.time()
             cpu, mem_mb = _cpu_and_mem()
-            rbd_mb = _rbd_usage_mb()
+            rbd_mb = _rbd_usage_mb(rbd_mount)
             cur_r, cur_w = _read_diskstats(rbd_device)
 
             if prev_r is not None and prev_ts is not None:
@@ -314,8 +318,9 @@ def build_results(args, t_analysis_start, t_analysis_end,
         "output":    args.output,
         # --- wall-clock timestamps (UTC) ---
         "t_analysis_start": t_analysis_start.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "t_fault_injected": t_fault.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "t_fault_injected": t_fault.strftime("%Y-%m-%dT%H:%M:%SZ") if t_fault else None,
         "t_analysis_end":   t_analysis_end.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "no_fault": args.no_fault,
         # --- recovery event timestamps (raw journal strings, node0 local tz) ---
         "t_down":       down_ts,
         "t_marked_out": marked_out_ts,
@@ -349,22 +354,30 @@ def main():
 
     preflight_check(args)
 
-    # OSD host and service name
-    osd_host, service_name = find_osd_info(args.osd_id, args.verbose)
+    # OSD host and service name (needed for fault/restore; skip lookup in no-fault mode)
+    if not args.no_fault:
+        osd_host, service_name = find_osd_info(args.osd_id, args.verbose)
+    else:
+        osd_host = service_name = None
+        print("No-fault mode: OSD fault injection disabled (baseline/control run)")
 
     # ── Start journal stream early (before fault so we don't miss any events) ──
-    journal_proc = start_journal_stream(30, args.verbose)
-    time.sleep(1.5)  # let SSH + journalctl establish
+    if not args.no_fault:
+        journal_proc = start_journal_stream(30, args.verbose)
+        time.sleep(1.5)  # let SSH + journalctl establish
+    else:
+        journal_proc = None
 
     # ── Start performance monitor ──────────────────────────────────────────────
     perf_csv = os.path.join(out_dir, "perf.csv")
-    rbd_device = find_rbd_device(RBD_MOUNT)
+    rbd_device = find_rbd_device(args.rbd_mount)
     vlog(f"RBD device: /dev/{rbd_device}", args.verbose)
 
     stop_monitor = threading.Event()
     monitor_thread = threading.Thread(
         target=perf_monitor,
-        args=(perf_csv, rbd_device, stop_monitor, args.monitor_interval),
+        args=(perf_csv, rbd_device, stop_monitor, args.monitor_interval,
+              args.rbd_mount),
         daemon=True, name="perf-monitor",
     )
     monitor_thread.start()
@@ -384,36 +397,41 @@ def main():
           f"{args.bins} bins")
 
     # ── Start recovery journal watcher ─────────────────────────────────────────
-    # Runs in background from the start; detects events as they happen.
     recovery_events = {}
     watcher_done = threading.Event()
 
-    def run_watcher():
-        raw = watch_journal(
-            journal_proc, args.osd_id, args.timeout,
-            grace_period_mode=True,
-            verbose=args.verbose,
-        )
-        recovery_events.update(raw)
-        watcher_done.set()
+    if not args.no_fault:
+        def run_watcher():
+            raw = watch_journal(
+                journal_proc, args.osd_id, args.timeout,
+                grace_period_mode=True,
+                verbose=args.verbose,
+            )
+            recovery_events.update(raw)
+            watcher_done.set()
 
-    watcher_thread = threading.Thread(
-        target=run_watcher, daemon=True, name="journal-watcher"
-    )
-    watcher_thread.start()
+        watcher_thread = threading.Thread(
+            target=run_watcher, daemon=True, name="journal-watcher"
+        )
+        watcher_thread.start()
+    else:
+        watcher_done.set()  # nothing to wait for
 
     # ── Fault injection (main thread, after fault_delay) ──────────────────────
-    print(f"Waiting {args.fault_delay} s before fault injection...")
-    time.sleep(args.fault_delay)
-    t_fault = datetime.now(timezone.utc)
-    print(f"Injecting fault at {t_fault.strftime('%H:%M:%SZ')} UTC: "
-          f"stopping osd.{args.osd_id} on {osd_host}...")
-    try:
-        stop_osd_daemon(args.osd_id, osd_host, service_name, args.verbose)
-        print(f"OSD daemon stopped. Mon will mark it out after "
-              f"~{args.timeout//10} s grace period. Recovery watcher running...")
-    except SystemExit:
-        print("WARNING: stop_osd_daemon failed — fault not injected.", file=sys.stderr)
+    if not args.no_fault:
+        print(f"Waiting {args.fault_delay} s before fault injection...")
+        time.sleep(args.fault_delay)
+        t_fault = datetime.now(timezone.utc)
+        print(f"Injecting fault at {t_fault.strftime('%H:%M:%SZ')} UTC: "
+              f"stopping osd.{args.osd_id} on {osd_host}...")
+        try:
+            stop_osd_daemon(args.osd_id, osd_host, service_name, args.verbose)
+            print(f"OSD daemon stopped. Mon will mark it out after "
+                  f"~{args.timeout//10} s grace period. Recovery watcher running...")
+        except SystemExit:
+            print("WARNING: stop_osd_daemon failed — fault not injected.", file=sys.stderr)
+    else:
+        t_fault = None
 
     # ── Wait for analysis to complete ─────────────────────────────────────────
     print("Waiting for analysis to complete...")
@@ -428,15 +446,15 @@ def main():
     monitor_thread.join(timeout=10)
 
     # ── Wait for recovery detection ────────────────────────────────────────────
-    # Analysis may finish before recovery; keep watching until healthy or timeout.
-    remaining = max(60, args.timeout - int(analysis_duration))
-    print(f"Waiting up to {remaining} s for recovery detection...")
-    watcher_done.wait(timeout=remaining)
-    if not watcher_done.is_set():
-        print("WARNING: recovery detection timed out before healthy.", file=sys.stderr)
+    if not args.no_fault:
+        remaining = max(60, args.timeout - int(analysis_duration))
+        print(f"Waiting up to {remaining} s for recovery detection...")
+        watcher_done.wait(timeout=remaining)
+        if not watcher_done.is_set():
+            print("WARNING: recovery detection timed out before healthy.", file=sys.stderr)
 
     # ── Restore OSD ───────────────────────────────────────────────────────────
-    if not args.no_restore:
+    if not args.no_fault and not args.no_restore:
         print(f"Restoring osd.{args.osd_id}...")
         try:
             start_osd_daemon(osd_host, service_name, args.verbose)
@@ -444,7 +462,8 @@ def main():
             print("WARNING: failed to start OSD daemon", file=sys.stderr)
         osd_in(args.osd_id, args.verbose)
 
-    stop_journal_stream(journal_proc)
+    if journal_proc is not None:
+        stop_journal_stream(journal_proc)
 
     # ── Write results JSON ─────────────────────────────────────────────────────
     results = build_results(

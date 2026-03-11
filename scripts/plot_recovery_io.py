@@ -2,9 +2,8 @@
 """
 Plot Gray-Scott analysis I/O performance with OSD recovery annotations.
 
-Produces a 4-panel dark-theme PNG showing read throughput, write throughput,
-CPU/memory, and RBD disk usage over time, with vertical markers and shaded
-regions for each recovery phase (grace period, data recovery).
+Produces a publication-ready 2-panel white-background PNG showing read and
+write throughput over time with shaded recovery phases and event markers.
 
 Usage:
   python3 plot_recovery_io.py <perf_csv> <results_json> <output_png>
@@ -23,6 +22,7 @@ import csv
 import json
 import sys
 import os
+import re
 from datetime import datetime, timezone
 
 try:
@@ -30,6 +30,7 @@ try:
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     import matplotlib.gridspec as gridspec
+    import matplotlib.ticker as ticker
     from matplotlib.patches import Patch
 except ImportError:
     os.system("sudo apt-get install -y python3-matplotlib --quiet")
@@ -37,6 +38,7 @@ except ImportError:
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     import matplotlib.gridspec as gridspec
+    import matplotlib.ticker as ticker
     from matplotlib.patches import Patch
 
 
@@ -52,9 +54,6 @@ def load_perf(path):
             try:
                 rows.append({
                     "ts":       float(row["timestamp"]),
-                    "cpu":      float(row["cpu_percent"]) if row["cpu_percent"] else 0.0,
-                    "mem_mb":   float(row["memory_mb"]),
-                    "rbd_mb":   float(row["rbd_usage_mb"]),
                     "read_mb":  float(row["io_read_mb"]),
                     "write_mb": float(row["io_write_mb"]),
                 })
@@ -64,12 +63,12 @@ def load_perf(path):
 
 
 def parse_ts(ts_str):
-    """Parse an ISO-8601 string (with Z or ±HHMM offset) to a timezone-aware datetime."""
+    """Parse an ISO-8601 string (with Z or ±HHMM/±HH:MM offset) to datetime."""
     if not ts_str:
         return None
     s = ts_str.strip()
-    if s.endswith("Z"):
-        s = s[:-1] + "+00:00"
+    s = s.replace("Z", "+00:00")
+    s = re.sub(r"([+-])(\d{2})(\d{2})$", r"\1\2:\3", s)
     try:
         return datetime.fromisoformat(s)
     except (ValueError, AttributeError):
@@ -97,194 +96,178 @@ def main():
     with open(results_json) as f:
         res = json.load(f)
 
-    # Reference epoch: t_analysis_start (UTC epoch float)
-    t_start_dt = parse_ts(res.get("t_analysis_start"))
+    no_fault = res.get("no_fault", False)
+
+    # Reference epoch from analysis start
+    t_start_dt    = parse_ts(res.get("t_analysis_start"))
     t_start_epoch = t_start_dt.timestamp() if t_start_dt else rows[0]["ts"]
 
-    def to_elapsed(ts_str):
-        """Convert a timestamp string to elapsed seconds from analysis start."""
-        dt = parse_ts(ts_str)
+    def to_elapsed(key):
+        dt = parse_ts(res.get(key))
         if dt is None:
             return None
         return dt.timestamp() - t_start_epoch
 
     # ── Time series ────────────────────────────────────────────────────────────
     elapsed  = [max(0.0, r["ts"] - t_start_epoch) for r in rows]
-    read_mb  = [r["read_mb"]        for r in rows]
-    write_mb = [r["write_mb"]       for r in rows]
-    cpu      = [r["cpu"]            for r in rows]
-    mem_gb   = [r["mem_mb"] / 1024  for r in rows]
-    rbd_gb   = [r["rbd_mb"] / 1024  for r in rows]
+    read_mb  = [r["read_mb"]  for r in rows]
+    write_mb = [r["write_mb"] for r in rows]
+    xmax     = elapsed[-1] * 1.02
 
-    xmax = elapsed[-1] * 1.02 if elapsed else 100.0
-
-    # ── Recovery events ────────────────────────────────────────────────────────
-    # Each entry: elapsed_seconds (or None if event not captured)
+    # ── Recovery event timestamps (elapsed s) ─────────────────────────────────
     ev = {
-        "fault":      to_elapsed(res.get("t_fault_injected")),
-        "down":       to_elapsed(res.get("t_down")),
-        "marked_out": to_elapsed(res.get("t_marked_out")),
-        "recovering": to_elapsed(res.get("t_recovering")),
-        "healthy":    to_elapsed(res.get("t_healthy")),
+        "fault":      to_elapsed("t_fault_injected"),
+        "down":       to_elapsed("t_down"),
+        "marked_out": to_elapsed("t_marked_out"),
+        "recovering": to_elapsed("t_recovering"),
+        "healthy":    to_elapsed("t_healthy"),
     }
 
-    # Vertical-line styling: (color, linestyle, short label)
-    EV_STYLE = {
-        "fault":      ("#ff4444", "--", "OSD stopped"),
-        "down":       ("#ff8c00", "-.", "OSD down"),
-        "marked_out": ("#ffd700", "--", "Marked out"),
-        "recovering": ("#00d4ff", "--", "Recovery start"),
-        "healthy":    ("#44ee88", "--", "Healthy"),
-    }
+    # Use "down" if available, else "fault" as the OSD-stopped reference
+    osd_stopped = ev["down"] if ev["down"] is not None else ev["fault"]
 
     # Shaded region boundaries
-    grace_start = ev.get("fault") or ev.get("down")
-    grace_end   = ev.get("marked_out")
-    recov_start = grace_end
-    recov_end   = ev.get("healthy")
+    grace_start = osd_stopped
+    grace_end   = ev["marked_out"]
+    recov_start = ev["recovering"] if ev["recovering"] is not None else grace_end
+    recov_end   = ev["healthy"]
 
-    # ── Colour palette (matches plot_io.py) ───────────────────────────────────
-    DARK  = "#0f1117"
-    GRID  = "#1e2130"
-    TICK  = "#8890a8"
-    READ  = "#00d4ff"
-    WRITE = "#ff6b6b"
-    CPU_C = "#a8ff78"
-    MEM_C = "#f7971e"
-    RBD_C = "#c471ed"
+    # ── Colours (paper-friendly) ───────────────────────────────────────────────
+    C_READ    = "#2166ac"   # blue
+    C_WRITE   = "#d6604d"   # red-orange
+    C_GRACE   = "#f4a460"   # sandy brown shading
+    C_RECOV   = "#f08080"   # light coral shading
+    C_DOWN    = "#e74c3c"   # event line: OSD down/stopped
+    C_OUT     = "#e67e22"   # event line: marked out
+    C_RSTART  = "#27ae60"   # event line: recovery start
+    C_HEALTHY = "#1a9641"   # event line: healthy
 
-    # ── Layout ────────────────────────────────────────────────────────────────
-    fig = plt.figure(figsize=(14, 13), facecolor=DARK)
-    gs  = gridspec.GridSpec(4, 1, hspace=0.52, figure=fig,
-                            top=0.90, bottom=0.07, left=0.09, right=0.97)
-    axes = [fig.add_subplot(gs[i]) for i in range(4)]
+    # ── Figure setup (paper style) ─────────────────────────────────────────────
+    plt.rcParams.update({
+        "font.family":        "sans-serif",
+        "font.size":          10,
+        "axes.linewidth":     0.8,
+        "axes.spines.top":    False,
+        "axes.spines.right":  False,
+        "xtick.direction":    "out",
+        "ytick.direction":    "out",
+        "xtick.major.size":   4,
+        "ytick.major.size":   4,
+        "xtick.minor.size":   2,
+        "ytick.minor.size":   2,
+        "xtick.minor.visible": True,
+        "ytick.minor.visible": True,
+        "grid.color":         "#dddddd",
+        "grid.linewidth":     0.5,
+        "grid.linestyle":     "--",
+        "figure.dpi":         150,
+    })
 
-    def style_ax(ax, ylabel, title):
-        ax.set_facecolor(DARK)
-        ax.tick_params(colors=TICK, labelsize=8)
-        ax.spines[:].set_color(GRID)
-        ax.yaxis.label.set_color(TICK)
-        ax.xaxis.label.set_color(TICK)
-        ax.set_ylabel(ylabel, fontsize=8)
-        ax.set_title(title, color="#c8cde0", fontsize=9, pad=5, loc="left")
-        ax.grid(True, color=GRID, linewidth=0.5, linestyle="--")
-        ax.set_xlim(0, xmax)
+    fig, axes = plt.subplots(2, 1, figsize=(11, 6),
+                             sharex=True,
+                             facecolor="white",
+                             gridspec_kw={"hspace": 0.35,
+                                          "top": 0.88, "bottom": 0.10,
+                                          "left": 0.08, "right": 0.97})
 
-    def add_event_annotations(ax):
-        """Add vertical lines and shaded regions to ax."""
+    def add_annotations(ax):
+        """Shaded regions + vertical event lines + in-plot labels."""
         ymin, ymax = ax.get_ylim()
-        yrange = max(ymax - ymin, 1e-6)
+        text_top = ymax - (ymax - ymin) * 0.04   # just below top edge
 
-        # Shaded regions first (behind lines)
-        if grace_start is not None and grace_end is not None and grace_start < grace_end:
-            ax.axvspan(grace_start, min(grace_end, xmax),
-                       alpha=0.08, color="#aaaaaa", zorder=1)
-        if recov_start is not None and recov_end is not None and recov_start < recov_end:
-            ax.axvspan(recov_start, min(recov_end, xmax),
-                       alpha=0.10, color="#ff6600", zorder=1)
+        # ── shaded regions ────────────────────────────────────────────────────
+        if not no_fault:
+            if grace_start is not None and grace_end is not None and grace_start < grace_end:
+                ax.axvspan(grace_start, min(grace_end, xmax),
+                           color=C_GRACE, alpha=0.30, zorder=0)
+            if recov_start is not None:
+                ax.axvspan(recov_start,
+                           min(recov_end, xmax) if recov_end else xmax,
+                           color=C_RECOV, alpha=0.30, zorder=0)
 
-        # Vertical lines + rotated labels
-        label_y_frac = [0.90, 0.78, 0.66, 0.54, 0.42]
-        for i, (key, (col, ls, label)) in enumerate(EV_STYLE.items()):
-            x = ev.get(key)
-            if x is None or x < 0 or x > xmax:
+        # ── vertical event lines ───────────────────────────────────────────────
+        events = []
+        if not no_fault:
+            if osd_stopped is not None:
+                events.append((osd_stopped, C_DOWN,   "--", "OSD down"))
+            if ev["marked_out"] is not None:
+                events.append((ev["marked_out"], C_OUT, "--", "OSD marked out"))
+            if recov_start is not None:
+                events.append((recov_start, C_RSTART, "--", "recovery start"))
+            if ev["healthy"] is not None:
+                events.append((ev["healthy"], C_HEALTHY, "--", "recovered"))
+
+        for x, color, ls, label in events:
+            if x < 0 or x > xmax:
                 continue
-            ax.axvline(x, color=col, linewidth=1.3, linestyle=ls,
-                       alpha=0.90, zorder=2)
-            text_y = ymin + yrange * label_y_frac[i % len(label_y_frac)]
-            ax.text(x + xmax * 0.004, text_y, label,
-                    color=col, fontsize=6.5, rotation=90,
-                    va="top", ha="left", zorder=3)
+            ax.axvline(x, color=color, linewidth=1.5, linestyle=ls,
+                       alpha=0.9, zorder=3)
+            ax.text(x + xmax * 0.005, text_top, label,
+                    color=color, fontsize=8, fontweight="bold",
+                    va="top", ha="left", zorder=4,
+                    bbox=dict(boxstyle="round,pad=0.15", fc="white",
+                              ec=color, alpha=0.75, linewidth=0.6))
 
     # ── Panel 1: Read throughput ───────────────────────────────────────────────
-    ax = axes[0]
-    peak_r = max(read_mb) if read_mb else 1.0
-    avg_r  = sum(read_mb) / len(read_mb) if read_mb else 0.0
-    ax.fill_between(elapsed, read_mb, alpha=0.20, color=READ)
-    ax.plot(elapsed, read_mb, color=READ, lw=1.6,
-            label=f"Read  (peak {peak_r:.1f} MB/s)")
-    ax.axhline(avg_r, color=READ, lw=0.8, linestyle=":", alpha=0.6,
-               label=f"Avg read {avg_r:.1f} MB/s")
-    style_ax(ax, "MB/s", "Read throughput  —  analysis input from RBD")
-    add_event_annotations(ax)
+    ax1 = axes[0]
+    avg_r = sum(read_mb) / len(read_mb)
+    ax1.fill_between(elapsed, read_mb, alpha=0.18, color=C_READ)
+    ax1.plot(elapsed, read_mb, color=C_READ, lw=1.4, label="Read throughput")
+    ax1.axhline(avg_r, color=C_READ, lw=1.0, linestyle=":", alpha=0.7,
+                label=f"Mean: {avg_r:.1f} MB/s")
+    ax1.set_ylabel("Read throughput (MB/s)", fontsize=10)
+    ax1.yaxis.set_minor_locator(ticker.AutoMinorLocator())
+    ax1.grid(True, which="major")
+    ax1.set_facecolor("white")
+    ax1.set_xlim(0, xmax)
+    add_annotations(ax1)
 
-    region_patches = [
-        Patch(facecolor="#aaaaaa", alpha=0.35, label="Grace period (~600 s)"),
-        Patch(facecolor="#ff6600", alpha=0.40, label="Recovery"),
-    ]
-    ax.legend(handles=ax.get_lines() + region_patches,
-              fontsize=7, framealpha=0.15, labelcolor="white",
-              facecolor="#1e2130", edgecolor=GRID)
+    # shade legend patches
+    legend_handles = [ln for ln in ax1.get_lines()
+                      if not ln.get_label().startswith("_")]
+    if not no_fault:
+        legend_handles += [
+            Patch(facecolor=C_GRACE, alpha=0.45, label="Grace period (~600 s)"),
+            Patch(facecolor=C_RECOV, alpha=0.45, label="EC recovery"),
+        ]
+    ax1.legend(handles=legend_handles, fontsize=8.5, frameon=True,
+               framealpha=0.9, loc="lower right")
 
     # ── Panel 2: Write throughput ──────────────────────────────────────────────
-    ax = axes[1]
-    peak_w = max(write_mb) if write_mb else 1.0
-    ax.fill_between(elapsed, write_mb, alpha=0.20, color=WRITE)
-    ax.plot(elapsed, write_mb, color=WRITE, lw=1.6,
-            label=f"Write (peak {peak_w:.1f} MB/s)")
-    style_ax(ax, "MB/s", "Write throughput  —  PDF analysis output to RBD")
-    add_event_annotations(ax)
-    ax.legend(fontsize=7, framealpha=0.15, labelcolor="white",
-              facecolor="#1e2130", edgecolor=GRID)
-
-    # ── Panel 3: CPU + Memory (dual axis) ─────────────────────────────────────
-    ax = axes[2]
-    ax.plot(elapsed, cpu, color=CPU_C, lw=1.4, label="CPU %")
-    ax_r = ax.twinx()
-    ax_r.plot(elapsed, mem_gb, color=MEM_C, lw=1.4, linestyle="--", label="Mem (GB)")
-    ax_r.tick_params(colors=TICK, labelsize=8)
-    ax_r.set_ylabel("Memory (GB)", color=TICK, fontsize=8)
-    ax_r.spines[:].set_color(GRID)
-    style_ax(ax, "CPU %", "CPU utilisation & memory usage")
-    add_event_annotations(ax)
-    lines  = ax.get_lines() + ax_r.get_lines()
-    labels = [l.get_label() for l in lines]
-    ax.legend(lines, labels, fontsize=7, framealpha=0.15, labelcolor="white",
-              facecolor="#1e2130", edgecolor=GRID)
-
-    # ── Panel 4: RBD disk usage ────────────────────────────────────────────────
-    ax = axes[3]
-    final_gb = rbd_gb[-1] if rbd_gb else 0.0
-    ax.fill_between(elapsed, rbd_gb, alpha=0.25, color=RBD_C)
-    ax.plot(elapsed, rbd_gb, color=RBD_C, lw=1.6,
-            label=f"RBD used: {final_gb:.1f} GB")
-    style_ax(ax, "GB used", "RBD cumulative disk usage")
-    ax.set_xlabel("Elapsed time (seconds from analysis start)", color=TICK, fontsize=8)
-    add_event_annotations(ax)
-    ax.legend(fontsize=7, framealpha=0.15, labelcolor="white",
-              facecolor="#1e2130", edgecolor=GRID)
-
-    # ── Event legend (bottom of figure) ───────────────────────────────────────
-    ev_patches = [
-        Patch(color=col, label=f"{label}  (t={ev[k]:.0f} s)" if ev.get(k) else label)
-        for k, (col, _, label) in EV_STYLE.items()
-        if ev.get(k) is not None
-    ]
-    if ev_patches:
-        fig.legend(handles=ev_patches, loc="lower center",
-                   ncol=len(ev_patches), fontsize=7.5,
-                   framealpha=0.15, labelcolor="white",
-                   facecolor="#1e2130", edgecolor=GRID,
-                   bbox_to_anchor=(0.5, 0.01))
+    ax2 = axes[1]
+    avg_w = sum(write_mb) / len(write_mb)
+    ax2.fill_between(elapsed, write_mb, alpha=0.18, color=C_WRITE)
+    ax2.plot(elapsed, write_mb, color=C_WRITE, lw=1.4, label="Write throughput")
+    ax2.axhline(avg_w, color=C_WRITE, lw=1.0, linestyle=":", alpha=0.7,
+                label=f"Mean: {avg_w:.2f} MB/s")
+    ax2.set_ylabel("Write throughput (MB/s)", fontsize=10)
+    ax2.set_xlabel("Elapsed time (s from analysis start)", fontsize=10)
+    ax2.yaxis.set_minor_locator(ticker.AutoMinorLocator())
+    ax2.grid(True, which="major")
+    ax2.set_facecolor("white")
+    add_annotations(ax2)
+    ax2.legend(fontsize=8.5, frameon=True, framealpha=0.9, loc="upper right")
 
     # ── Title ─────────────────────────────────────────────────────────────────
-    osd_id     = res.get("osd_id", "?")
-    mpi_procs  = res.get("mpi_procs", "?")
-    dur_a      = res.get("duration_analysis_s")
-    dur_a_str  = f"{dur_a:.0f} s" if dur_a else "?"
-    dur_r      = res.get("duration_recovery_s")
-    dur_r_str  = f"{dur_r:.0f} s ({dur_r/60:.1f} min)" if dur_r else "?"
-    dur_gp     = res.get("duration_grace_period_s")
-    dur_gp_str = f"{dur_gp:.0f} s" if dur_gp else "?"
+    osd_id    = res.get("osd_id", "?")
+    pool      = "EC RS(k=6,m=4)" if "ec" in str(res.get("input", "")).lower() else "3-replica RBD"
+    dur_a     = res.get("duration_analysis_s")
+    dur_a_str = f"{dur_a:.0f} s ({dur_a/60:.1f} min)" if dur_a else "?"
+    dur_gp    = res.get("duration_grace_period_s")
+    gp_str    = f"{dur_gp:.0f} s" if dur_gp else "n/a"
+    dur_r     = res.get("duration_recovery_s")
+    r_str     = f"{dur_r:.0f} s ({dur_r/60:.1f} min)" if dur_r else "ongoing"
 
-    fig.suptitle(
-        f"Gray-Scott PDF Analysis  —  OSD {osd_id} failure & recovery  |  "
-        f"MPI: {mpi_procs}  |  Analysis: {dur_a_str}  |  "
-        f"Grace: {dur_gp_str}  |  Recovery: {dur_r_str}",
-        color="#e0e4f0", fontsize=9.5, y=0.96,
-    )
+    if no_fault:
+        title = (f"Gray-Scott PDF Analysis  —  {pool}  |  No-fault baseline\n"
+                 f"Analysis duration: {dur_a_str}")
+    else:
+        title = (f"Gray-Scott PDF Analysis  —  {pool}  |  OSD {osd_id} failure & recovery\n"
+                 f"Analysis: {dur_a_str}   Grace period: {gp_str}   Recovery: {r_str}")
 
-    plt.savefig(output_png, dpi=150, bbox_inches="tight", facecolor=DARK)
+    fig.suptitle(title, fontsize=10.5, fontweight="bold", y=0.97)
+
+    plt.savefig(output_png, dpi=150, bbox_inches="tight", facecolor="white")
     print(f"Plot written to: {output_png}")
 
 

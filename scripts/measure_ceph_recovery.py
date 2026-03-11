@@ -42,21 +42,6 @@ import sys
 import time
 from datetime import datetime, timezone, timedelta
 
-__all__ = [
-    # OSD host discovery
-    "find_osd_info",
-    # OSD daemon control
-    "stop_osd_daemon", "start_osd_daemon", "osd_out", "osd_in",
-    # Journal streaming
-    "start_journal_stream", "stop_journal_stream", "watch_journal",
-    # Shell helpers
-    "run_local", "run_on_mon", "run_on_osd_host",
-    # Utilities
-    "vlog", "parse_journal_ts", "pgmap_state", "all_clean",
-    # Constants
-    "MON_HOST",
-]
-
 # ---------------------------------------------------------------------------
 # Patterns
 # ---------------------------------------------------------------------------
