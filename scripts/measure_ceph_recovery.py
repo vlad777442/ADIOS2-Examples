@@ -66,6 +66,7 @@ DEGRADED_RE  = re.compile(r"degraded",         re.IGNORECASE)
 RECOVERING_RE = re.compile(r"recover|backfill", re.IGNORECASE)
 
 MON_HOST = "root@node0"
+SSH_OPTS = ["-o", "StrictHostKeyChecking=accept-new"]
 
 
 # ---------------------------------------------------------------------------
@@ -95,7 +96,7 @@ def run_on_mon(cmd_str, verbose=False):
     """Run a command on node0 (the mon / cephadm host)."""
     vlog(f"node0: {cmd_str}", verbose)
     r = subprocess.run(
-        ["ssh", MON_HOST, cmd_str],
+        ["ssh", *SSH_OPTS, MON_HOST, cmd_str],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
     if r.returncode != 0:
@@ -112,7 +113,7 @@ def run_on_osd_host(osd_host, cmd_str, verbose=False):
     vlog(f"{osd_host}: {cmd_str}", verbose)
     nested = f"ssh -o StrictHostKeyChecking=no root@{osd_host} {cmd_str}"
     r = subprocess.run(
-        ["ssh", MON_HOST, nested],
+        ["ssh", *SSH_OPTS, MON_HOST, nested],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
     if r.returncode != 0:
@@ -238,7 +239,7 @@ def start_journal_stream(tail_lines, verbose):
     )
     vlog(f"journal stream: ssh {MON_HOST} '{remote_cmd}'", verbose)
     return subprocess.Popen(
-        ["ssh", MON_HOST, remote_cmd],
+        ["ssh", *SSH_OPTS, MON_HOST, remote_cmd],
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
         text=True,

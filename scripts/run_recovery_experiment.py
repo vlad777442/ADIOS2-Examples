@@ -76,7 +76,7 @@ def parse_args():
                    help="MPI ranks for analysis (default: 2)")
     p.add_argument("--bins", type=int, default=100,
                    help="PDF histogram bins (default: 100)")
-    p.add_argument("--fault-delay", type=int, default=60, metavar="SECS",
+    p.add_argument("--fault-delay", type=int, default=280, metavar="SECS",
                    help="Seconds after analysis start before injecting fault (default: 60)")
     p.add_argument("--input", default=DEFAULT_INPUT, metavar="PATH",
                    help=f"BP5 simulation input (default: {DEFAULT_INPUT})")
@@ -84,8 +84,8 @@ def parse_args():
                    help=f"BP5 analysis output (default: {DEFAULT_OUTPUT})")
     p.add_argument("--output-dir", default=RESULTS_BASE, metavar="DIR",
                    help="Parent directory for results folder (default: results/)")
-    p.add_argument("--timeout", type=int, default=7200,
-                   help="Max seconds to wait for full recovery (default: 7200)")
+    p.add_argument("--timeout", type=int, default=24400,
+                   help="Max seconds to wait for full recovery (default: 2s4400)")
     p.add_argument("--monitor-interval", type=float, default=3.0, metavar="SECS",
                    help="Performance sampling interval in seconds (default: 3)")
     p.add_argument("--no-restore", action="store_true",
@@ -263,8 +263,16 @@ def start_analysis(args):
     ld = env.get("LD_LIBRARY_PATH", "")
     env["LD_LIBRARY_PATH"] = f"{ADIOS2_LIB}:{ld}" if ld else ADIOS2_LIB
 
+    # If launched via sudo, OpenMPI blocks root by default unless explicitly allowed.
+    run_as_root = hasattr(os, "geteuid") and os.geteuid() == 0
+    if run_as_root:
+        env["OMPI_ALLOW_RUN_AS_ROOT"] = "1"
+        env["OMPI_ALLOW_RUN_AS_ROOT_CONFIRM"] = "1"
+
     cmd = [
-        "mpirun", "-n", str(args.mpi_procs), "--oversubscribe",
+        "mpirun",
+        *( ["--allow-run-as-root"] if run_as_root else [] ),
+        "-n", str(args.mpi_procs), "--oversubscribe",
         PDF_CALC,
         args.input,
         args.output,
