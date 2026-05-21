@@ -82,7 +82,7 @@ run_simulation() {
     echo "⏱️  Monitoring performance every 5 seconds..."
     
     local sim_start=$(date +%s.%N)
-    time mpirun -n $processes ./build/adios2-gray-scott settings-rbd.json
+    time mpirun --oversubscribe -n $processes ./build/adios2-gray-scott settings-rbd.json
     local sim_exit_code=$?
     local sim_end=$(date +%s.%N)
     

@@ -111,7 +111,7 @@ def run_on_osd_host(osd_host, cmd_str, verbose=False):
     Client → node0 → osd_host (client has no direct root SSH to OSD nodes).
     """
     vlog(f"{osd_host}: {cmd_str}", verbose)
-    nested = f"ssh -o StrictHostKeyChecking=no root@{osd_host} {cmd_str}"
+    nested = f"ssh -o StrictHostKeyChecking=accept-new root@{osd_host} {cmd_str}"
     r = subprocess.run(
         ["ssh", *SSH_OPTS, MON_HOST, nested],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
@@ -168,13 +168,13 @@ def find_osd_info(osd_id, verbose):
     hostname    – e.g. 'node4'
     service_name – e.g. 'ceph-<fsid>@osd.3.service'
     """
-    r = run_local(f"ceph osd find {osd_id} --format json", verbose)
+    r = run_local(f"sudo ceph osd find {osd_id} --format json", verbose)
     if r.returncode != 0:
         print(f"ERROR: ceph osd find {osd_id} failed", file=sys.stderr)
         sys.exit(1)
     host = json.loads(r.stdout)["host"]
 
-    r2 = run_local("ceph fsid", verbose)
+    r2 = run_local("sudo ceph fsid", verbose)
     if r2.returncode != 0:
         print("ERROR: ceph fsid failed", file=sys.stderr)
         sys.exit(1)
@@ -209,7 +209,7 @@ def start_osd_daemon(osd_host, service_name, verbose):
 
 def osd_out(osd_id, verbose):
     """Immediately mark OSD out via local ceph CLI (--force-out mode)."""
-    r = run_local(f"ceph osd out osd.{osd_id}", verbose)
+    r = run_local(f"sudo ceph osd out osd.{osd_id}", verbose)
     if r.returncode != 0:
         print(f"ERROR: ceph osd out osd.{osd_id} failed:\n{r.stderr}", file=sys.stderr)
         sys.exit(1)
@@ -218,7 +218,7 @@ def osd_out(osd_id, verbose):
 
 def osd_in(osd_id, verbose):
     """Mark OSD back in via local ceph CLI."""
-    r = run_local(f"ceph osd in osd.{osd_id}", verbose)
+    r = run_local(f"sudo ceph osd in osd.{osd_id}", verbose)
     if r.returncode != 0:
         print(f"WARNING: ceph osd in osd.{osd_id} failed:\n{r.stderr}", file=sys.stderr)
     else:

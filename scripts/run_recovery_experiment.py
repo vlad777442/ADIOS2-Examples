@@ -56,9 +56,9 @@ from measure_ceph_recovery import (
 ADIOS2_LIB    = "/users/vlad777/research/ADIOS2-Examples/ADIOS2/build/lib"
 GS_DIR        = "/users/vlad777/research/ADIOS2-Examples/source/cpp/gray-scott"
 PDF_CALC      = os.path.join(GS_DIR, "build", "adios2-pdf-calc")
-RBD_MOUNT     = "/mnt/rbd"
-DEFAULT_INPUT  = "/mnt/rbd/gray-scott/gs-rbd.bp"
-DEFAULT_OUTPUT = "/mnt/rbd/gray-scott/analysis/pdf-rbd.bp"
+RBD_MOUNT     = "/mnt/clay_rbd"
+DEFAULT_INPUT  = "/mnt/clay_rbd/gs-rbd.bp"
+DEFAULT_OUTPUT = "/mnt/clay_rbd/analysis/pdf-rbd.bp"
 RESULTS_BASE   = "/users/vlad777/research/ADIOS2-Examples/results"
 
 
@@ -84,7 +84,7 @@ def parse_args():
                    help=f"BP5 analysis output (default: {DEFAULT_OUTPUT})")
     p.add_argument("--output-dir", default=RESULTS_BASE, metavar="DIR",
                    help="Parent directory for results folder (default: results/)")
-    p.add_argument("--timeout", type=int, default=24400,
+    p.add_argument("--timeout", type=int, default=64400,
                    help="Max seconds to wait for full recovery (default: 2s4400)")
     p.add_argument("--monitor-interval", type=float, default=3.0, metavar="SECS",
                    help="Performance sampling interval in seconds (default: 3)")
@@ -104,7 +104,7 @@ def parse_args():
 def preflight_check(args):
     errors = []
 
-    r = subprocess.run(["ceph", "health"], capture_output=True, text=True)
+    r = subprocess.run(["sudo", "ceph", "health"], capture_output=True, text=True)
     if r.returncode != 0:
         errors.append("ceph health check failed — is the cluster reachable?")
     elif "HEALTH_ERR" in r.stdout:
@@ -165,6 +165,24 @@ def _read_diskstats(device):
         pass
     return 0, 0
 
+def _read_netstats():
+    """Return (bytes_recv, bytes_sent) from /proc/net/dev, ignoring loopback."""
+    rx_bytes = tx_bytes = 0
+    try:
+        with open("/proc/net/dev") as f:
+            for line in f:
+                if ":" in line:
+                    iface, data = line.split(":", 1)
+                    if iface.strip() == "lo":
+                        continue
+                    parts = data.split()
+                    if len(parts) >= 9:
+                        rx_bytes += int(parts[0])
+                        tx_bytes += int(parts[8])
+    except OSError:
+        pass
+    return rx_bytes, tx_bytes
+
 
 def _rbd_usage_mb(mount=RBD_MOUNT):
     r = subprocess.run(["df", "-m", mount], capture_output=True, text=True)
@@ -212,6 +230,7 @@ def perf_monitor(csv_path, rbd_device, stop_event, interval=3.0, rbd_mount=RBD_M
     """
     SECTOR_BYTES = 512
     prev_r = prev_w = prev_ts = None
+    prev_rx = prev_tx = None
 
     # Prime psutil CPU counter (first call always returns 0)
     try:
@@ -223,29 +242,34 @@ def perf_monitor(csv_path, rbd_device, stop_event, interval=3.0, rbd_mount=RBD_M
     with open(csv_path, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["timestamp", "cpu_percent", "memory_mb",
-                         "rbd_usage_mb", "io_read_mb", "io_write_mb"])
+                         "rbd_usage_mb", "io_read_mb", "io_write_mb", "net_rx_mb", "net_tx_mb"])
 
         while not stop_event.is_set():
             ts = time.time()
             cpu, mem_mb = _cpu_and_mem()
             rbd_mb = _rbd_usage_mb(rbd_mount)
             cur_r, cur_w = _read_diskstats(rbd_device)
+            cur_rx, cur_tx = _read_netstats()
 
             if prev_r is not None and prev_ts is not None:
                 dt = ts - prev_ts
                 if dt > 0:
                     read_mb_s  = (cur_r - prev_r) * SECTOR_BYTES / (1024**2) / dt
                     write_mb_s = (cur_w - prev_w) * SECTOR_BYTES / (1024**2) / dt
+                    rx_mb_s = (cur_rx - prev_rx) / (1024**2) / dt if prev_rx is not None else 0.0
+                    tx_mb_s = (cur_tx - prev_tx) / (1024**2) / dt if prev_tx is not None else 0.0
                 else:
-                    read_mb_s = write_mb_s = 0.0
+                    read_mb_s = write_mb_s = rx_mb_s = tx_mb_s = 0.0
             else:
-                read_mb_s = write_mb_s = 0.0
+                read_mb_s = write_mb_s = rx_mb_s = tx_mb_s = 0.0
 
             prev_r, prev_w, prev_ts = cur_r, cur_w, ts
+            prev_rx, prev_tx = cur_rx, cur_tx
 
             writer.writerow([
                 f"{ts:.6f}", f"{cpu:.1f}", f"{mem_mb:.0f}",
                 f"{rbd_mb:.0f}", f"{read_mb_s:.3f}", f"{write_mb_s:.3f}",
+                f"{rx_mb_s:.3f}", f"{tx_mb_s:.3f}",
             ])
             f.flush()
 

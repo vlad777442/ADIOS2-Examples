@@ -56,6 +56,8 @@ def load_perf(path):
                     "ts":       float(row["timestamp"]),
                     "read_mb":  float(row["io_read_mb"]),
                     "write_mb": float(row["io_write_mb"]),
+                    "rx_mb":    float(row.get("net_rx_mb", 0)),
+                    "tx_mb":    float(row.get("net_tx_mb", 0)),
                 })
             except (ValueError, KeyError):
                 continue
@@ -109,9 +111,21 @@ def main():
         return dt.timestamp() - t_start_epoch
 
     # ── Time series ────────────────────────────────────────────────────────────
+    
+    def smooth(data, window=5):
+        if len(data) < window or window < 2: return data
+        res = []
+        for i in range(len(data)):
+            s = max(0, i - window//2)
+            e = min(len(data), i + window//2 + 1)
+            res.append(sum(data[s:e]) / (e - s))
+        return res
+
     elapsed  = [max(0.0, r["ts"] - t_start_epoch) for r in rows]
-    read_mb  = [r["read_mb"]  for r in rows]
-    write_mb = [r["write_mb"] for r in rows]
+    read_mb  = smooth([r["read_mb"]  for r in rows], 7)
+    write_mb = smooth([r["write_mb"] for r in rows], 7)
+    rx_mb    = smooth([r["rx_mb"]    for r in rows], 7)
+    tx_mb    = smooth([r["tx_mb"]    for r in rows], 7)
     xmax     = elapsed[-1] * 1.02
 
     # ── Recovery event timestamps (elapsed s) ─────────────────────────────────
@@ -163,11 +177,11 @@ def main():
         "figure.dpi":         150,
     })
 
-    fig, axes = plt.subplots(2, 1, figsize=(11, 6),
+    fig, axes = plt.subplots(3, 1, figsize=(11, 8.5),
                              sharex=True,
                              facecolor="white",
-                             gridspec_kw={"hspace": 0.35,
-                                          "top": 0.88, "bottom": 0.10,
+                             gridspec_kw={"hspace": 0.40,
+                                          "top": 0.88, "bottom": 0.08,
                                           "left": 0.08, "right": 0.97})
 
     def add_annotations(ax):
@@ -234,19 +248,49 @@ def main():
                framealpha=0.9, loc="lower right")
 
     # ── Panel 2: Write throughput ──────────────────────────────────────────────
-    ax2 = axes[1]
-    avg_w = sum(write_mb) / len(write_mb)
-    ax2.fill_between(elapsed, write_mb, alpha=0.18, color=C_WRITE)
-    ax2.plot(elapsed, write_mb, color=C_WRITE, lw=1.4, label="Write throughput")
-    ax2.axhline(avg_w, color=C_WRITE, lw=1.0, linestyle=":", alpha=0.7,
-                label=f"Mean: {avg_w:.2f} MB/s")
-    ax2.set_ylabel("Write throughput (MB/s)", fontsize=10)
-    ax2.set_xlabel("Elapsed time (s from analysis start)", fontsize=10)
-    ax2.yaxis.set_minor_locator(ticker.AutoMinorLocator())
-    ax2.grid(True, which="major")
-    ax2.set_facecolor("white")
-    add_annotations(ax2)
-    ax2.legend(fontsize=8.5, frameon=True, framealpha=0.9, loc="upper right")
+    # ax2 = axes[1]
+    # avg_w = sum(write_mb) / len(write_mb)
+    # ax2.fill_between(elapsed, write_mb, alpha=0.18, color=C_WRITE)
+    # ax2.plot(elapsed, write_mb, color=C_WRITE, lw=1.4, label="Write throughput")
+    # ax2.axhline(avg_w, color=C_WRITE, lw=1.0, linestyle=":", alpha=0.7,
+    #             label=f"Mean: {avg_w:.2f} MB/s")
+    # ax2.set_ylabel("Write throughput (MB/s)", fontsize=10)
+    # ax2.yaxis.set_minor_locator(ticker.AutoMinorLocator())
+    # ax2.grid(True, which="major")
+    # ax2.set_facecolor("white")
+    # add_annotations(ax2)
+    # ax2.legend(fontsize=8.5, frameon=True, framealpha=0.9, loc="upper right")
+
+    # ── Panel 3: Network Rx ──────────────────────────────────────────────────
+    ax3 = axes[1]
+    avg_rx = sum(rx_mb) / len(rx_mb) if rx_mb else 0
+    C_RX = "#9b59b6"
+    ax3.fill_between(elapsed, rx_mb, alpha=0.18, color=C_RX)
+    ax3.plot(elapsed, rx_mb, color=C_RX, lw=1.4, label="Network Rx (total)")
+    ax3.axhline(avg_rx, color=C_RX, lw=1.0, linestyle=":", alpha=0.7,
+                label=f"Mean: {avg_rx:.2f} MB/s")
+    ax3.set_ylabel("Net Rx (MB/s)", fontsize=10)
+    ax3.yaxis.set_minor_locator(ticker.AutoMinorLocator())
+    ax3.grid(True, which="major")
+    ax3.set_facecolor("white")
+    add_annotations(ax3)
+    ax3.legend(fontsize=8.5, frameon=True, framealpha=0.9, loc="upper right")
+
+    # ── Panel 4: Network Tx ──────────────────────────────────────────────────
+    ax4 = axes[2]
+    avg_tx = sum(tx_mb) / len(tx_mb) if tx_mb else 0
+    C_TX = "#34495e"
+    ax4.fill_between(elapsed, tx_mb, alpha=0.18, color=C_TX)
+    ax4.plot(elapsed, tx_mb, color=C_TX, lw=1.4, label="Network Tx (total)")
+    ax4.axhline(avg_tx, color=C_TX, lw=1.0, linestyle=":", alpha=0.7,
+                label=f"Mean: {avg_tx:.2f} MB/s")
+    ax4.set_ylabel("Net Tx (MB/s)", fontsize=10)
+    ax4.set_xlabel("Elapsed time (s from analysis start)", fontsize=10)
+    ax4.yaxis.set_minor_locator(ticker.AutoMinorLocator())
+    ax4.grid(True, which="major")
+    ax4.set_facecolor("white")
+    add_annotations(ax4)
+    ax4.legend(fontsize=8.5, frameon=True, framealpha=0.9, loc="upper right")
 
     # ── Title ─────────────────────────────────────────────────────────────────
     osd_id    = res.get("osd_id", "?")
