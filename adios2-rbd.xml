@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<!-- Minimal ADIOS2 config for Gray-Scott runs on RBD-mounted filesystem -->
+<adios-config>
+
+    <io name="SimulationOutput">
+        <engine type="BP5">
+            <parameter key="Threads" value="1"/>
+            <parameter key="ProfileUnits" value="Microseconds"/>
+            <parameter key="FlushStepsCount" value="1"/>
+        </engine>
+
+        <transport type="File">
+            <parameter key="Library" value="stdio"/>
+            <parameter key="ProfileUnits" value="Microseconds"/>
+        </transport>
+    </io>
+
+    <io name="SimulationCheckpoint">
+        <engine type="BP5">
+            <parameter key="Threads" value="1"/>
+            <parameter key="ProfileUnits" value="Microseconds"/>
+        </engine>
+
+        <transport type="File">
+            <parameter key="Library" value="stdio"/>
+            <parameter key="ProfileUnits" value="Microseconds"/>
+        </transport>
+    </io>
+
+</adios-config>

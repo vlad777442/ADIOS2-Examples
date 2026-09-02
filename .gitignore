@@ -33,3 +33,6 @@ build*/
 # julia
 Manifest.toml
 
+# Python virtual environment
+.venv/
+
