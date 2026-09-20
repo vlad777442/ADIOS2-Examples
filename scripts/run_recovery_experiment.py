@@ -94,6 +94,8 @@ def parse_args():
                    help=f"Mount point of the RBD device to monitor (default: {RBD_MOUNT})")
     p.add_argument("--no-fault", action="store_true",
                    help="Run analysis only, no OSD fault injection (baseline/control run)")
+    p.add_argument("--allow-health-warn", action="store_true",
+                   help="Allow a pre-existing HEALTH_WARN after verifying the target OSD is healthy")
     p.add_argument("--verbose", "-v", action="store_true")
     return p.parse_args()
 
@@ -101,6 +103,25 @@ def parse_args():
 # ---------------------------------------------------------------------------
 # Pre-flight checks
 # ---------------------------------------------------------------------------
+def _ceph_snapshot():
+    health = subprocess.run(
+        ["sudo", "ceph", "health", "detail"],
+        capture_output=True, text=True,
+    )
+    status = subprocess.run(
+        ["sudo", "ceph", "-s", "--format", "json"],
+        capture_output=True, text=True,
+    )
+    try:
+        status_json = json.loads(status.stdout) if status.returncode == 0 else None
+    except json.JSONDecodeError:
+        status_json = None
+    return {
+        "health_detail": health.stdout.strip(),
+        "status": status_json,
+    }
+
+
 def preflight_check(args):
     errors = []
 
@@ -109,6 +130,35 @@ def preflight_check(args):
         errors.append("ceph health check failed — is the cluster reachable?")
     elif "HEALTH_ERR" in r.stdout:
         errors.append(f"Cluster not healthy: {r.stdout.strip()}")
+    elif "HEALTH_WARN" in r.stdout and not args.allow_health_warn:
+        errors.append(
+            "Cluster is HEALTH_WARN. Review it and rerun with --allow-health-warn "
+            "to treat this warning as the experiment baseline."
+        )
+
+    baseline = _ceph_snapshot()
+    if not args.no_fault:
+        osd = subprocess.run(
+            ["sudo", "ceph", "osd", "dump", "--format", "json"],
+            capture_output=True, text=True,
+        )
+        if osd.returncode != 0:
+            errors.append(f"Unable to inspect osd.{args.osd_id}")
+        else:
+            try:
+                osd_dump = json.loads(osd.stdout)
+                osd_json = next(
+                    item for item in osd_dump["osds"]
+                    if item.get("osd") == args.osd_id
+                )
+                baseline["osd"] = osd_json
+                if not osd_json.get("up") or not osd_json.get("in"):
+                    errors.append(
+                        f"Target osd.{args.osd_id} is not healthy at baseline "
+                        f"(up={osd_json.get('up')}, in={osd_json.get('in')})"
+                    )
+            except (KeyError, StopIteration, json.JSONDecodeError):
+                errors.append(f"Could not parse status for osd.{args.osd_id}")
 
     if not os.path.ismount(args.rbd_mount):
         errors.append(f"{args.rbd_mount} is not mounted")
@@ -129,6 +179,7 @@ def preflight_check(args):
         sys.exit(1)
 
     print("Pre-flight OK")
+    return baseline
 
 
 # ---------------------------------------------------------------------------
@@ -332,15 +383,16 @@ def _secs(dt0, dt1):
 
 
 def build_results(args, t_analysis_start, t_analysis_end,
-                  t_fault, recovery_events, perf_csv, out_dir):
+                  t_fault_requested, t_fault_injected, fault_status,
+                  baseline, post_fault, recovery_events, perf_csv, out_dir):
     down_dt,       down_ts       = recovery_events.get("down",       (None, None))
     marked_out_dt, marked_out_ts = recovery_events.get("marked_out", (None, None))
     degraded_dt,   degraded_ts   = recovery_events.get("degraded",   (None, None))
     recovering_dt, recovering_ts = recovery_events.get("recovering", (None, None))
     healthy_dt,    healthy_ts    = recovery_events.get("healthy",    (None, None))
 
-    # Grace period reference: use t_down if detected, else t_fault wall-clock
-    grace_ref = down_dt or t_fault
+    # Grace period reference: use t_down if detected, else command-success time.
+    grace_ref = down_dt or t_fault_injected
 
     return {
         "osd_id":    args.osd_id,
@@ -348,9 +400,14 @@ def build_results(args, t_analysis_start, t_analysis_end,
         "bins":      args.bins,
         "input":     args.input,
         "output":    args.output,
+        "baseline_health": baseline.get("status", {}).get("health", {}).get("status"),
+        "baseline_ceph": baseline,
+        "post_fault_ceph": post_fault,
         # --- wall-clock timestamps (UTC) ---
         "t_analysis_start": t_analysis_start.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "t_fault_injected": t_fault.strftime("%Y-%m-%dT%H:%M:%SZ") if t_fault else None,
+        "t_fault_requested": t_fault_requested.strftime("%Y-%m-%dT%H:%M:%SZ") if t_fault_requested else None,
+        "t_fault_injected": t_fault_injected.strftime("%Y-%m-%dT%H:%M:%SZ") if t_fault_injected else None,
+        "fault_injection_status": fault_status,
         "t_analysis_end":   t_analysis_end.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "no_fault": args.no_fault,
         # --- recovery event timestamps (raw journal strings, node0 local tz) ---
@@ -365,7 +422,7 @@ def build_results(args, t_analysis_start, t_analysis_end,
         "duration_grace_period_s":      _secs(grace_ref, marked_out_dt),
         "duration_out_to_recovering_s": _secs(marked_out_dt, recovering_dt),
         "duration_recovery_s":          _secs(recovering_dt, healthy_dt),
-        "duration_total_downtime_s":    _secs(degraded_dt or t_fault, healthy_dt),
+        "duration_total_downtime_s":    _secs(degraded_dt or t_fault_injected, healthy_dt),
         # --- file paths ---
         "perf_csv":  perf_csv,
         "output_dir": out_dir,
@@ -384,7 +441,7 @@ def main():
     os.makedirs(out_dir, exist_ok=True)
     print(f"Output directory: {out_dir}")
 
-    preflight_check(args)
+    baseline = preflight_check(args)
 
     # OSD host and service name (needed for fault/restore; skip lookup in no-fault mode)
     if not args.no_fault:
@@ -450,20 +507,30 @@ def main():
         watcher_done.set()  # nothing to wait for
 
     # ── Fault injection (main thread, after fault_delay) ──────────────────────
+    t_fault_requested = None
+    t_fault_injected = None
+    fault_status = "not_requested" if args.no_fault else "not_attempted"
+    post_fault = None
+
     if not args.no_fault:
         print(f"Waiting {args.fault_delay} s before fault injection...")
         time.sleep(args.fault_delay)
-        t_fault = datetime.now(timezone.utc)
-        print(f"Injecting fault at {t_fault.strftime('%H:%M:%SZ')} UTC: "
+        t_fault_requested = datetime.now(timezone.utc)
+        print(f"Requesting fault at {t_fault_requested.strftime('%H:%M:%SZ')} UTC: "
               f"stopping osd.{args.osd_id} on {osd_host}...")
         try:
             stop_osd_daemon(args.osd_id, osd_host, service_name, args.verbose)
+            t_fault_injected = datetime.now(timezone.utc)
+            fault_status = "confirmed_command_success"
+            post_fault = _ceph_snapshot()
             print(f"OSD daemon stopped. Mon will mark it out after "
                   f"~{args.timeout//10} s grace period. Recovery watcher running...")
         except SystemExit:
+            fault_status = "command_failed"
             print("WARNING: stop_osd_daemon failed — fault not injected.", file=sys.stderr)
     else:
-        t_fault = None
+        t_fault_requested = None
+        t_fault_injected = None
 
     # ── Wait for analysis to complete ─────────────────────────────────────────
     print("Waiting for analysis to complete...")
@@ -484,6 +551,11 @@ def main():
         watcher_done.wait(timeout=remaining)
         if not watcher_done.is_set():
             print("WARNING: recovery detection timed out before healthy.", file=sys.stderr)
+        if t_fault_injected is not None:
+            if recovery_events.get("down", (None, None))[0] is not None:
+                fault_status = "confirmed_by_monitor"
+            else:
+                fault_status = "command_success_unconfirmed"
 
     # ── Restore OSD ───────────────────────────────────────────────────────────
     if not args.no_fault and not args.no_restore:
@@ -500,7 +572,8 @@ def main():
     # ── Write results JSON ─────────────────────────────────────────────────────
     results = build_results(
         args, t_analysis_start, t_analysis_end,
-        t_fault, recovery_events, perf_csv, out_dir,
+        t_fault_requested, t_fault_injected, fault_status,
+        baseline, post_fault, recovery_events, perf_csv, out_dir,
     )
     results_path = os.path.join(out_dir, "results.json")
     with open(results_path, "w") as f:

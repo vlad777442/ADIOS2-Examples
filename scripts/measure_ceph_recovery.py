@@ -35,6 +35,7 @@ Usage:
 """
 
 import argparse
+import select
 import subprocess
 import re
 import json
@@ -158,6 +159,31 @@ def all_clean(total_pgs, summary):
     return bool(m) and int(m.group(1)) == total_pgs
 
 
+def ceph_pgmap_state(verbose=False):
+    """Return (has_degraded, has_recovery, all_clean) from Ceph status JSON."""
+    r = run_local("sudo ceph -s --format json", verbose)
+    if r.returncode != 0:
+        return None
+    try:
+        pgmap = json.loads(r.stdout).get("pgmap", {})
+    except json.JSONDecodeError:
+        return None
+
+    states = pgmap.get("pgs_by_state", [])
+    state_names = [item.get("state_name", "") for item in states]
+    has_degraded = any("degraded" in name for name in state_names)
+    has_recovery = any(
+        "recover" in name or "backfill" in name for name in state_names
+    )
+    total_pgs = pgmap.get("num_pgs", 0)
+    clean_count = sum(
+        item.get("count", 0)
+        for item in states
+        if item.get("state_name") == "active+clean"
+    )
+    return has_degraded, has_recovery, total_pgs > 0 and clean_count == total_pgs
+
+
 # ---------------------------------------------------------------------------
 # OSD host discovery
 # ---------------------------------------------------------------------------
@@ -166,7 +192,7 @@ def find_osd_info(osd_id, verbose):
     """
     Return (hostname, service_name) for the given OSD.
     hostname    – e.g. 'node4'
-    service_name – e.g. 'ceph-<fsid>@osd.3.service'
+    service_name – the loaded systemd unit for the OSD host
     """
     r = run_local(f"sudo ceph osd find {osd_id} --format json", verbose)
     if r.returncode != 0:
@@ -174,13 +200,19 @@ def find_osd_info(osd_id, verbose):
         sys.exit(1)
     host = json.loads(r.stdout)["host"]
 
-    r2 = run_local("sudo ceph fsid", verbose)
-    if r2.returncode != 0:
-        print("ERROR: ceph fsid failed", file=sys.stderr)
-        sys.exit(1)
-    fsid = r2.stdout.strip()
-
-    service_name = f"ceph-{fsid}@osd.{osd_id}.service"
+    unit = run_on_osd_host(
+        host,
+        f"systemctl show --property=Id --value ceph-osd@{osd_id}.service",
+        verbose,
+    )
+    service_name = unit.stdout.strip()
+    if unit.returncode != 0 or not service_name:
+        r2 = run_local("sudo ceph fsid", verbose)
+        if r2.returncode != 0:
+            print("ERROR: could not discover OSD service unit", file=sys.stderr)
+            sys.exit(1)
+        fsid = r2.stdout.strip()
+        service_name = f"ceph-{fsid}@osd.{osd_id}.service"
     vlog(f"osd.{osd_id} → host={host}  service={service_name}", verbose)
     return host, service_name
 
@@ -278,9 +310,39 @@ def watch_journal(proc, osd_id, timeout, grace_period_mode, verbose):
         vlog(f"waiting for mon to auto-mark osd.{osd_id} out "
              f"(mon_osd_down_out_interval ≈ 600 s) ...", verbose)
 
-    for raw in iter(proc.stdout.readline, ""):
+    next_status_poll = 0.0
+    while True:
         if datetime.now(timezone.utc) > deadline:
             print(f"Timeout ({timeout}s) reached.", file=sys.stderr)
+            break
+
+        now = time.monotonic()
+        if now >= next_status_poll:
+            status = ceph_pgmap_state(verbose)
+            next_status_poll = now + 2.0
+            if status is not None:
+                has_degraded, has_recovery, status_clean = status
+                status_dt = datetime.now(timezone.utc)
+                status_ts = status_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+                if not found["degraded"] and has_degraded:
+                    results["degraded"] = (status_dt, status_ts)
+                    found["degraded"] = True
+                    vlog(f"  → degraded (ceph status): {status_ts}", verbose)
+                if not found["recovering"] and has_recovery:
+                    results["recovering"] = (status_dt, status_ts)
+                    found["recovering"] = True
+                    vlog(f"  → recovering (ceph status): {status_ts}", verbose)
+                if (found["degraded"] or found["recovering"]) and not found["healthy"] and status_clean:
+                    results["healthy"] = (status_dt, status_ts)
+                    found["healthy"] = True
+                    vlog(f"  → all pgs active+clean (ceph status): {status_ts}", verbose)
+                    break
+
+        ready, _, _ = select.select([proc.stdout], [], [], 0.5)
+        if not ready:
+            continue
+        raw = proc.stdout.readline()
+        if raw == "":
             break
 
         line = raw.rstrip()
