@@ -1,0 +1,327 @@
+{
+  "osd_id": 3,
+  "mpi_procs": 4,
+  "bins": 100,
+  "input": "/mnt/optlrc/gray-scott/gs-rbd.bp",
+  "output": "/mnt/optlrc/gray-scott/analysis/pdf-rbd-osd3-fault-mpi4-final.bp",
+  "baseline_health": "HEALTH_OK",
+  "baseline_ceph": {
+    "health_detail": "HEALTH_OK",
+    "status": {
+      "fsid": "b8c846c4-b6e2-11f1-9dba-0926f162ca53",
+      "health": {
+        "status": "HEALTH_OK",
+        "checks": {},
+        "mutes": []
+      },
+      "election_epoch": 22,
+      "quorum": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "quorum_names": [
+        "node0",
+        "node1",
+        "node10",
+        "node4",
+        "node3"
+      ],
+      "quorum_age": 609817,
+      "monmap": {
+        "epoch": 5,
+        "min_mon_release_name": "reef",
+        "num_mons": 5
+      },
+      "osdmap": {
+        "epoch": 102,
+        "num_osds": 10,
+        "num_up_osds": 10,
+        "osd_up_since": 1790122759,
+        "num_in_osds": 10,
+        "osd_in_since": 1790122703,
+        "num_remapped_pgs": 0
+      },
+      "pgmap": {
+        "pgs_by_state": [
+          {
+            "state_name": "active+clean",
+            "count": 65
+          }
+        ],
+        "num_pgs": 65,
+        "num_pools": 3,
+        "num_objects": 71041,
+        "data_bytes": 296915391112,
+        "bytes_used": 510784659456,
+        "bytes_avail": 2239353364480,
+        "bytes_total": 2750138023936
+      },
+      "fsmap": {
+        "epoch": 1,
+        "by_rank": [],
+        "up:standby": 0
+      },
+      "mgrmap": {
+        "available": true,
+        "num_standbys": 1,
+        "modules": [
+          "cephadm",
+          "dashboard",
+          "iostat",
+          "nfs",
+          "prometheus",
+          "restful"
+        ],
+        "services": {
+          "dashboard": "https://10.10.1.1:8443/",
+          "prometheus": "http://10.10.1.1:9283/"
+        }
+      },
+      "servicemap": {
+        "epoch": 3846,
+        "modified": "2026-09-30T01:42:37.186037+0000",
+        "services": {}
+      },
+      "progress_events": {}
+    },
+    "osd": {
+      "osd": 3,
+      "uuid": "c2e5bbdc-ce6a-436f-8c3a-064f6883488d",
+      "up": 1,
+      "in": 1,
+      "weight": 1,
+      "primary_affinity": 1,
+      "last_clean_begin": 0,
+      "last_clean_end": 0,
+      "up_from": 25,
+      "up_thru": 44,
+      "down_at": 0,
+      "lost_at": 0,
+      "public_addrs": {
+        "addrvec": [
+          {
+            "type": "v2",
+            "addr": "10.10.1.3:6800",
+            "nonce": 3259816426
+          },
+          {
+            "type": "v1",
+            "addr": "10.10.1.3:6801",
+            "nonce": 3259816426
+          }
+        ]
+      },
+      "cluster_addrs": {
+        "addrvec": [
+          {
+            "type": "v2",
+            "addr": "10.10.1.3:6802",
+            "nonce": 3259816426
+          },
+          {
+            "type": "v1",
+            "addr": "10.10.1.3:6803",
+            "nonce": 3259816426
+          }
+        ]
+      },
+      "heartbeat_back_addrs": {
+        "addrvec": [
+          {
+            "type": "v2",
+            "addr": "10.10.1.3:6806",
+            "nonce": 3259816426
+          },
+          {
+            "type": "v1",
+            "addr": "10.10.1.3:6807",
+            "nonce": 3259816426
+          }
+        ]
+      },
+      "heartbeat_front_addrs": {
+        "addrvec": [
+          {
+            "type": "v2",
+            "addr": "10.10.1.3:6804",
+            "nonce": 3259816426
+          },
+          {
+            "type": "v1",
+            "addr": "10.10.1.3:6805",
+            "nonce": 3259816426
+          }
+        ]
+      },
+      "public_addr": "10.10.1.3:6801/3259816426",
+      "cluster_addr": "10.10.1.3:6803/3259816426",
+      "heartbeat_back_addr": "10.10.1.3:6807/3259816426",
+      "heartbeat_front_addr": "10.10.1.3:6805/3259816426",
+      "state": [
+        "exists",
+        "up"
+      ]
+    }
+  },
+  "post_fault_ceph": {
+    "health_detail": "HEALTH_WARN 1 osds down; 1 host (1 osds) down; Reduced data availability: 3 pgs peering; Degraded data redundancy: 17912/710457 objects degraded (2.521%), 8 pgs degraded\n[WRN] OSD_DOWN: 1 osds down\n    osd.3 (root=default,host=node2) is down\n[WRN] OSD_HOST_DOWN: 1 host (1 osds) down\n    host node2 (root=default) (1 osds) is down\n[WRN] PG_AVAILABILITY: Reduced data availability: 3 pgs peering\n    pg 3.e is stuck peering for 111s, current state peering, last acting [1,4]\n    pg 3.11 is stuck peering for 2m, current state peering, last acting [1,7]\n    pg 3.1d is stuck peering for 2m, current state peering, last acting [4,6]\n[WRN] PG_DEGRADED: Degraded data redundancy: 17912/710457 objects degraded (2.521%), 8 pgs degraded\n    pg 2.2 is active+undersized+degraded, acting [2,9,NONE,7,1,8,4,6,5,0]\n    pg 2.3 is active+undersized+degraded, acting [2,8,4,NONE,9,1,5,6,0,7]\n    pg 2.b is active+undersized+degraded, acting [2,9,NONE,4,8,6,5,0,1,7]\n    pg 2.d is active+undersized+degraded, acting [2,6,0,9,7,4,NONE,8,5,1]\n    pg 2.f is active+undersized+degraded, acting [2,7,8,4,1,NONE,5,9,0,6]\n    pg 2.14 is active+undersized+degraded, acting [2,NONE,6,1,0,5,4,9,8,7]\n    pg 2.1b is active+undersized+degraded, acting [2,5,4,NONE,6,9,8,0,1,7]\n    pg 2.1c is active+undersized+degraded, acting [2,NONE,5,1,8,6,9,0,4,7]",
+    "status": {
+      "fsid": "b8c846c4-b6e2-11f1-9dba-0926f162ca53",
+      "health": {
+        "status": "HEALTH_WARN",
+        "checks": {
+          "OSD_DOWN": {
+            "severity": "HEALTH_WARN",
+            "summary": {
+              "message": "1 osds down",
+              "count": 1
+            },
+            "muted": false
+          },
+          "OSD_HOST_DOWN": {
+            "severity": "HEALTH_WARN",
+            "summary": {
+              "message": "1 host (1 osds) down",
+              "count": 1
+            },
+            "muted": false
+          },
+          "PG_AVAILABILITY": {
+            "severity": "HEALTH_WARN",
+            "summary": {
+              "message": "Reduced data availability: 3 pgs peering",
+              "count": 3
+            },
+            "muted": false
+          },
+          "PG_DEGRADED": {
+            "severity": "HEALTH_WARN",
+            "summary": {
+              "message": "Degraded data redundancy: 49031/710457 objects degraded (6.901%), 24 pgs degraded",
+              "count": 24
+            },
+            "muted": false
+          }
+        },
+        "mutes": []
+      },
+      "election_epoch": 22,
+      "quorum": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "quorum_names": [
+        "node0",
+        "node1",
+        "node10",
+        "node4",
+        "node3"
+      ],
+      "quorum_age": 610107,
+      "monmap": {
+        "epoch": 5,
+        "min_mon_release_name": "reef",
+        "num_mons": 5
+      },
+      "osdmap": {
+        "epoch": 104,
+        "num_osds": 10,
+        "num_up_osds": 9,
+        "osd_up_since": 1790732869,
+        "num_in_osds": 10,
+        "osd_in_since": 1790122703,
+        "num_remapped_pgs": 0
+      },
+      "pgmap": {
+        "pgs_by_state": [
+          {
+            "state_name": "active+undersized+degraded",
+            "count": 24
+          },
+          {
+            "state_name": "active+clean",
+            "count": 22
+          },
+          {
+            "state_name": "peering",
+            "count": 12
+          },
+          {
+            "state_name": "active+undersized",
+            "count": 6
+          },
+          {
+            "state_name": "stale+active+clean",
+            "count": 1
+          }
+        ],
+        "num_pgs": 65,
+        "num_pools": 3,
+        "num_objects": 71052,
+        "data_bytes": 296961843848,
+        "bytes_used": 510913974272,
+        "bytes_avail": 2239224049664,
+        "bytes_total": 2750138023936,
+        "inactive_pgs_ratio": 0.1846153885126114,
+        "degraded_objects": 49031,
+        "degraded_total": 710457,
+        "degraded_ratio": 0.06901332522587574,
+        "write_bytes_sec": 215087,
+        "read_op_per_sec": 0,
+        "write_op_per_sec": 1
+      },
+      "fsmap": {
+        "epoch": 1,
+        "by_rank": [],
+        "up:standby": 0
+      },
+      "mgrmap": {
+        "available": true,
+        "num_standbys": 1,
+        "modules": [
+          "cephadm",
+          "dashboard",
+          "iostat",
+          "nfs",
+          "prometheus",
+          "restful"
+        ],
+        "services": {
+          "dashboard": "https://10.10.1.1:8443/",
+          "prometheus": "http://10.10.1.1:9283/"
+        }
+      },
+      "servicemap": {
+        "epoch": 3847,
+        "modified": "2026-09-30T01:46:31.276568+0000",
+        "services": {}
+      },
+      "progress_events": {}
+    }
+  },
+  "t_analysis_start": "2026-09-30T01:43:08Z",
+  "t_fault_requested": "2026-09-30T01:47:48Z",
+  "t_fault_injected": "2026-09-30T01:47:53Z",
+  "fault_injection_status": "command_success_unconfirmed",
+  "t_analysis_end": "2026-09-30T02:31:23Z",
+  "no_fault": false,
+  "t_down": null,
+  "t_marked_out": null,
+  "t_degraded": null,
+  "t_recovering": null,
+  "t_healthy": null,
+  "duration_analysis_s": 2894.7,
+  "duration_fault_delay_s": 280,
+  "duration_grace_period_s": null,
+  "duration_out_to_recovering_s": null,
+  "duration_recovery_s": null,
+  "duration_total_downtime_s": null,
+  "perf_csv": "/users/vlad777/research/ADIOS2-Examples/results/recovery-experiment-20260929_194303/perf.csv",
+  "output_dir": "/users/vlad777/research/ADIOS2-Examples/results/recovery-experiment-20260929_194303"
+}

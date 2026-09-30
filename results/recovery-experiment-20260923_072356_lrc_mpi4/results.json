@@ -1,0 +1,114 @@
+{
+  "osd_id": 0,
+  "mpi_procs": 4,
+  "bins": 100,
+  "input": "/mnt/optlrc/gray-scott/gs-rbd.bp",
+  "output": "/mnt/optlrc/gray-scott/analysis/pdf-rbd-no-fault-mpi4.bp",
+  "baseline_health": "HEALTH_OK",
+  "baseline_ceph": {
+    "health_detail": "HEALTH_OK",
+    "status": {
+      "fsid": "b8c846c4-b6e2-11f1-9dba-0926f162ca53",
+      "health": {
+        "status": "HEALTH_OK",
+        "checks": {},
+        "mutes": []
+      },
+      "election_epoch": 22,
+      "quorum": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "quorum_names": [
+        "node0",
+        "node1",
+        "node10",
+        "node4",
+        "node3"
+      ],
+      "quorum_age": 47071,
+      "monmap": {
+        "epoch": 5,
+        "min_mon_release_name": "reef",
+        "num_mons": 5
+      },
+      "osdmap": {
+        "epoch": 50,
+        "num_osds": 10,
+        "num_up_osds": 10,
+        "osd_up_since": 1790122759,
+        "num_in_osds": 10,
+        "osd_in_since": 1790122703,
+        "num_remapped_pgs": 0
+      },
+      "pgmap": {
+        "pgs_by_state": [
+          {
+            "state_name": "active+clean",
+            "count": 65
+          }
+        ],
+        "num_pgs": 65,
+        "num_pools": 3,
+        "num_objects": 70688,
+        "data_bytes": 295439356552,
+        "bytes_used": 505828757504,
+        "bytes_avail": 2244309266432,
+        "bytes_total": 2750138023936,
+        "write_bytes_sec": 1023,
+        "read_op_per_sec": 0,
+        "write_op_per_sec": 0
+      },
+      "fsmap": {
+        "epoch": 1,
+        "by_rank": [],
+        "up:standby": 0
+      },
+      "mgrmap": {
+        "available": true,
+        "num_standbys": 1,
+        "modules": [
+          "cephadm",
+          "dashboard",
+          "iostat",
+          "nfs",
+          "prometheus",
+          "restful"
+        ],
+        "services": {
+          "dashboard": "https://10.10.1.1:8443/",
+          "prometheus": "http://10.10.1.1:9283/"
+        }
+      },
+      "servicemap": {
+        "epoch": 295,
+        "modified": "2026-09-23T13:20:22.500178+0000",
+        "services": {}
+      },
+      "progress_events": {}
+    }
+  },
+  "post_fault_ceph": null,
+  "t_analysis_start": "2026-09-23T13:23:59Z",
+  "t_fault_requested": null,
+  "t_fault_injected": null,
+  "fault_injection_status": "not_requested",
+  "t_analysis_end": "2026-09-23T14:10:42Z",
+  "no_fault": true,
+  "t_down": null,
+  "t_marked_out": null,
+  "t_degraded": null,
+  "t_recovering": null,
+  "t_healthy": null,
+  "duration_analysis_s": 2803.1,
+  "duration_fault_delay_s": 280,
+  "duration_grace_period_s": null,
+  "duration_out_to_recovering_s": null,
+  "duration_recovery_s": null,
+  "duration_total_downtime_s": null,
+  "perf_csv": "/users/vlad777/research/ADIOS2-Examples/results/recovery-experiment-20260923_072356/perf.csv",
+  "output_dir": "/users/vlad777/research/ADIOS2-Examples/results/recovery-experiment-20260923_072356"
+}

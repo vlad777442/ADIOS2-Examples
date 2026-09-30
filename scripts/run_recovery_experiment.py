@@ -53,7 +53,7 @@ from measure_ceph_recovery import (
 # ---------------------------------------------------------------------------
 # Paths  (edit if your layout differs)
 # ---------------------------------------------------------------------------
-ADIOS2_LIB    = "/users/vlad777/research/ADIOS2-Examples/ADIOS2/build/lib"
+ADIOS2_LIB    = "/users/vlad777/research/ADIOS2-Examples/ADIOS2/lib"
 GS_DIR        = "/users/vlad777/research/ADIOS2-Examples/source/cpp/gray-scott"
 PDF_CALC      = os.path.join(GS_DIR, "build", "adios2-pdf-calc")
 RBD_MOUNT     = "/mnt/clay_rbd"

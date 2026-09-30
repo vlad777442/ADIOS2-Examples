@@ -109,12 +109,11 @@ def run_on_mon(cmd_str, verbose=False):
 def run_on_osd_host(osd_host, cmd_str, verbose=False):
     """
     Run a command on an OSD host.
-    Client → node0 → osd_host (client has no direct root SSH to OSD nodes).
+    Connect directly to the OSD host using the client node's root SSH access.
     """
     vlog(f"{osd_host}: {cmd_str}", verbose)
-    nested = f"ssh -o StrictHostKeyChecking=accept-new root@{osd_host} {cmd_str}"
     r = subprocess.run(
-        ["ssh", *SSH_OPTS, MON_HOST, nested],
+        ["ssh", *SSH_OPTS, f"root@{osd_host}", cmd_str],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
     if r.returncode != 0:
@@ -200,19 +199,12 @@ def find_osd_info(osd_id, verbose):
         sys.exit(1)
     host = json.loads(r.stdout)["host"]
 
-    unit = run_on_osd_host(
-        host,
-        f"systemctl show --property=Id --value ceph-osd@{osd_id}.service",
-        verbose,
-    )
-    service_name = unit.stdout.strip()
-    if unit.returncode != 0 or not service_name:
-        r2 = run_local("sudo ceph fsid", verbose)
-        if r2.returncode != 0:
-            print("ERROR: could not discover OSD service unit", file=sys.stderr)
-            sys.exit(1)
-        fsid = r2.stdout.strip()
-        service_name = f"ceph-{fsid}@osd.{osd_id}.service"
+    r2 = run_local("sudo ceph fsid", verbose)
+    if r2.returncode != 0:
+        print("ERROR: could not discover OSD service unit", file=sys.stderr)
+        sys.exit(1)
+    fsid = r2.stdout.strip()
+    service_name = f"ceph-{fsid}@osd.{osd_id}.service"
     vlog(f"osd.{osd_id} → host={host}  service={service_name}", verbose)
     return host, service_name
 
