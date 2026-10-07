@@ -1,506 +1,118 @@
 #!/usr/bin/env python3
+"""Ceph recovery controls and structured polling for package/cephadm deployments.
+Mutations use root@node0 admin credentials; client queries use a named identity.
+Recovery milestones are observed states, with uncertainty up to the polling interval.
 """
-Measure Ceph OSD recovery time with realistic failure simulation.
-
-DEFAULT MODE (grace period):
-  Stops the OSD daemon on its host so the mon detects the failure naturally.
-  The mon waits mon_osd_down_out_interval (default 600 s) before marking the
-  OSD out, which then triggers PG remapping and recovery.
-
-  Timeline:
-    t_stop_wall  – wall-clock when daemon stop command is issued
-    t_down       – "osd.X marked itself down and dead" (mon detects failure)
-    t_marked_out – "Marking osd.X out (has been down for N seconds)" (grace period ends)
-    t_degraded   – first pgmap line with degraded PGs (OSD is down, copies missing)
-    t_recovering – first pgmap line with recovering/backfilling PGs (data moving)
-    t_healthy    – pgmap: all PGs back to active+clean
-
-  Restore: starts the daemon back and runs `ceph osd in`.
-
---force-out MODE:
-  Uses `ceph osd out` immediately, bypassing the grace period.
-  Useful for fast, repeatable benchmarks.
-
-Requirements:
-  - Local `ceph` CLI + keyring (client node, node11).
-  - SSH access as root to node0 (the mon, running cephadm).
-  - node0 has root SSH access to OSD host nodes (cephadm key distribution).
-  - Mon cluster log is read via: journalctl -u 'ceph*mon*' --follow on node0.
-
-Usage:
-  python3 measure_ceph_recovery.py <osd_id> [options]
-  python3 measure_ceph_recovery.py 3 --verbose
-  python3 measure_ceph_recovery.py 3 --force-out        # skip grace period
-  python3 measure_ceph_recovery.py 3 --no-restore       # leave OSD out after
-"""
-
 import argparse
-import select
-import subprocess
-import re
 import json
+import os
+import re
+import shlex
+import socket
+import subprocess
 import sys
 import time
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
+MON_HOST = 'root@node0'
+CEPH_NAME = 'client.' + socket.gethostname().split('.')[0]
+SSH_OPTS = ['-o','BatchMode=yes','-o','ConnectTimeout=10']
 
-# ---------------------------------------------------------------------------
-# Patterns
-# ---------------------------------------------------------------------------
+def vlog(message, verbose, file=sys.stderr):
+    if verbose: print(message,file=file)
 
-# journalctl --output short-iso lines start with an ISO-8601 timestamp:
-#   2026-03-08T14:36:47+0000 node0 ceph-mon[6612]: ...
-JOURNAL_TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{4})")
+def run_local(command, verbose=False):
+    argv=shlex.split(command) if isinstance(command,str) else list(command)
+    if argv[:2]==['sudo','ceph'] and '--name' not in argv:
+        argv[1:2]=['-n','ceph','--name',CEPH_NAME]
+    return subprocess.run(argv,capture_output=True,text=True,timeout=30)
 
-# Auto-markout:  "Marking osd.3 out (has been down for 602 seconds)"
-# Manual osd out: "osd.3 marked out"
-MARKED_OUT_RE = re.compile(r"[Mm]arking osd\.(\d+) out|osd\.(\d+) marked out")
+def run_on_mon(command,verbose=False):
+    return subprocess.run([*(['sudo','-n'] if os.geteuid()!=0 else []),'ssh',*SSH_OPTS,MON_HOST,command],capture_output=True,text=True,timeout=30)
 
-# OSD reports itself down:  "osd.3 marked itself down and dead"
-OSD_DOWN_RE = re.compile(r"osd\.(\d+) marked itself down")
+def run_on_osd_host(host,command,verbose=False):
+    if not re.fullmatch(r'[A-Za-z0-9_.-]+',host): raise ValueError('Invalid OSD hostname')
+    return subprocess.run([*(['sudo','-n'] if os.geteuid()!=0 else []),'ssh',*SSH_OPTS,'root@'+host,command],capture_output=True,text=True,timeout=30)
 
-# pgmap line emitted by mon every ~1 s:
-#   pgmap v210047: 97 pgs: 97 active+clean; 107 GiB data, ...
-#   pgmap v210047: 97 pgs: 47 active+degraded, 50 active+clean; ...
-#   pgmap v210047: 97 pgs: 47 active+recovering, 50 active+clean; ...
-PGMAP_RE = re.compile(r"pgmap v\d+: (\d+) pgs: ([^;]+)")
-DEGRADED_RE  = re.compile(r"degraded",         re.IGNORECASE)
-RECOVERING_RE = re.compile(r"recover|backfill", re.IGNORECASE)
+def checked(result):
+    if result.returncode: raise RuntimeError(result.stderr.strip() or result.stdout.strip() or 'Command failed')
+    return result.stdout
 
-MON_HOST = "root@node0"
-SSH_OPTS = ["-o", "StrictHostKeyChecking=accept-new"]
+def find_osd_info(osd_id,verbose=False):
+    info=json.loads(checked(run_local(['sudo','ceph','osd','find',str(osd_id),'-f','json'])))
+    host=info.get('host') or info['crush_location']['host']
+    fsid=checked(run_local(['sudo','ceph','fsid'])).strip()
+    errors=[]
+    for unit in [f'ceph-osd@{osd_id}.service',f'ceph-{fsid}@osd.{osd_id}.service']:
+        result=run_on_osd_host(host,'systemctl show '+shlex.quote(unit)+' --property=LoadState --property=ActiveState')
+        if result.returncode:errors.append(result.stderr.strip())
+        if result.returncode==0 and 'LoadState=loaded' in result.stdout and 'ActiveState=active' in result.stdout:
+            return host,unit
+    raise RuntimeError(f'No loaded active OSD unit found for osd.{osd_id} on {host}; SSH errors: {errors}')
 
+def stop_osd_daemon(osd_id,host,unit,verbose=False):
+    checked(run_on_osd_host(host,'systemctl stop '+shlex.quote(unit)))
+    state=checked(run_on_osd_host(host,'systemctl show '+shlex.quote(unit)+' --property=ActiveState --value')).strip()
+    if state not in ('inactive','failed'): raise RuntimeError('OSD unit did not stop: '+state)
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+def start_osd_daemon(host,unit,verbose=False):
+    checked(run_on_osd_host(host,'systemctl start '+shlex.quote(unit)))
+    checked(run_on_osd_host(host,'systemctl is-active '+shlex.quote(unit)))
 
-def vlog(msg, verbose, file=sys.stderr):
-    if verbose:
-        ts = datetime.now().strftime("%H:%M:%S")
-        print(f"[{ts}] {msg}", file=file)
+def osd_in(osd_id,verbose=False): checked(run_on_mon('ceph osd in '+str(int(osd_id))))
+def osd_out(osd_id,verbose=False): checked(run_on_mon('ceph osd out '+str(int(osd_id))))
 
+def recovery_snapshot(osd_id):
+    status=json.loads(checked(run_local(['sudo','ceph','status','-f','json'])))
+    dump=json.loads(checked(run_local(['sudo','ceph','osd','dump','-f','json'])))
+    target=next(o for o in dump['osds'] if o['osd']==osd_id)
+    pg=status.get('pgmap',{}); states=pg.get('pgs_by_state',[])
+    total=pg.get('num_pgs',0)
+    clean=sum(s['count'] for s in states if s['state_name']=='active+clean')
+    return {'observed_utc':datetime.now(timezone.utc).isoformat(),'osd':target,
+            'pgmap':pg,'all_clean':total>0 and clean==total,
+            'degraded':any('degraded' in s['state_name'] for s in states),
+            'recovering':any('recover' in s['state_name'] or 'backfill' in s['state_name'] for s in states)}
 
-def run_local(cmd_str, verbose=False):
-    """Run a command on the local host (client)."""
-    vlog(f"local: {cmd_str}", verbose)
-    r = subprocess.run(
-        cmd_str, shell=True,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-    )
-    if r.returncode != 0:
-        vlog(f"  stdout: {r.stdout.strip()}", verbose)
-        vlog(f"  stderr: {r.stderr.strip()}", verbose)
-    return r
-
-
-def run_on_mon(cmd_str, verbose=False):
-    """Run a command on node0 (the mon / cephadm host)."""
-    vlog(f"node0: {cmd_str}", verbose)
-    r = subprocess.run(
-        ["ssh", *SSH_OPTS, MON_HOST, cmd_str],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-    )
-    if r.returncode != 0:
-        vlog(f"  stdout: {r.stdout.strip()}", verbose)
-        vlog(f"  stderr: {r.stderr.strip()}", verbose)
-    return r
-
-
-def run_on_osd_host(osd_host, cmd_str, verbose=False):
+def watch_recovery(osd_id,timeout,interval=2.0,raw_path=None,require_restored=False,stop_event=None):
+    """Starts only after fault/restore request; no historical journal events.
+    Completion requires target down/out for remapping or up/in for restoration,
+    plus all PGs clean. Clean-before-markout cannot end the fault observation.
     """
-    Run a command on an OSD host.
-    Connect directly to the OSD host using the client node's root SSH access.
-    """
-    vlog(f"{osd_host}: {cmd_str}", verbose)
-    r = subprocess.run(
-        ["ssh", *SSH_OPTS, f"root@{osd_host}", cmd_str],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-    )
-    if r.returncode != 0:
-        vlog(f"  stdout: {r.stdout.strip()}", verbose)
-        vlog(f"  stderr: {r.stderr.strip()}", verbose)
-    return r
-
-
-def parse_journal_ts(line):
-    """
-    Extract a UTC datetime from a journalctl --output short-iso line.
-    Returns (datetime_utc, raw_ts_str) or (None, None).
-    """
-    m = JOURNAL_TS_RE.match(line.strip())
-    if not m:
-        return None, None
-    ts_str = m.group(1)
+    deadline=time.monotonic()+timeout
+    events={k:None for k in ('down','marked_out','degraded','recovering','healthy')}
+    raw=open(raw_path,'a') if raw_path else None
     try:
-        dt = datetime.strptime(ts_str, "%Y-%m-%dT%H:%M:%S%z")
-        return dt.astimezone(timezone.utc), ts_str
-    except ValueError:
-        return None, None
-
-
-def pgmap_state(line):
-    """
-    If this is a pgmap line, return (total_pgs, state_summary).
-    Otherwise None.
-    """
-    m = PGMAP_RE.search(line)
-    if not m:
-        return None
-    return int(m.group(1)), m.group(2).strip()
-
-
-def all_clean(total_pgs, summary):
-    """True when pgmap shows all PGs as active+clean and nothing else."""
-    parts = [p.strip() for p in summary.split(",")]
-    if len(parts) != 1:
-        return False
-    m = re.match(r"(\d+)\s+active\+clean$", parts[0])
-    return bool(m) and int(m.group(1)) == total_pgs
-
-
-def ceph_pgmap_state(verbose=False):
-    """Return (has_degraded, has_recovery, all_clean) from Ceph status JSON."""
-    r = run_local("sudo ceph -s --format json", verbose)
-    if r.returncode != 0:
-        return None
-    try:
-        pgmap = json.loads(r.stdout).get("pgmap", {})
-    except json.JSONDecodeError:
-        return None
-
-    states = pgmap.get("pgs_by_state", [])
-    state_names = [item.get("state_name", "") for item in states]
-    has_degraded = any("degraded" in name for name in state_names)
-    has_recovery = any(
-        "recover" in name or "backfill" in name for name in state_names
-    )
-    total_pgs = pgmap.get("num_pgs", 0)
-    clean_count = sum(
-        item.get("count", 0)
-        for item in states
-        if item.get("state_name") == "active+clean"
-    )
-    return has_degraded, has_recovery, total_pgs > 0 and clean_count == total_pgs
-
-
-# ---------------------------------------------------------------------------
-# OSD host discovery
-# ---------------------------------------------------------------------------
-
-def find_osd_info(osd_id, verbose):
-    """
-    Return (hostname, service_name) for the given OSD.
-    hostname    – e.g. 'node4'
-    service_name – the loaded systemd unit for the OSD host
-    """
-    r = run_local(f"sudo ceph osd find {osd_id} --format json", verbose)
-    if r.returncode != 0:
-        print(f"ERROR: ceph osd find {osd_id} failed", file=sys.stderr)
-        sys.exit(1)
-    host = json.loads(r.stdout)["host"]
-
-    r2 = run_local("sudo ceph fsid", verbose)
-    if r2.returncode != 0:
-        print("ERROR: could not discover OSD service unit", file=sys.stderr)
-        sys.exit(1)
-    fsid = r2.stdout.strip()
-    service_name = f"ceph-{fsid}@osd.{osd_id}.service"
-    vlog(f"osd.{osd_id} → host={host}  service={service_name}", verbose)
-    return host, service_name
-
-
-# ---------------------------------------------------------------------------
-# OSD daemon control
-# ---------------------------------------------------------------------------
-
-def stop_osd_daemon(osd_id, osd_host, service_name, verbose):
-    """Stop the OSD systemd service on its host (via node0 SSH hop)."""
-    r = run_on_osd_host(osd_host, f"systemctl stop {service_name}", verbose)
-    if r.returncode != 0:
-        print(f"ERROR: failed to stop {service_name} on {osd_host}", file=sys.stderr)
-        sys.exit(1)
-    vlog(f"stopped {service_name} on {osd_host}", verbose)
-
-
-def start_osd_daemon(osd_host, service_name, verbose):
-    """Start the OSD systemd service on its host (via node0 SSH hop)."""
-    r = run_on_osd_host(osd_host, f"systemctl start {service_name}", verbose)
-    if r.returncode != 0:
-        print(f"WARNING: failed to start {service_name} on {osd_host}", file=sys.stderr)
-    else:
-        vlog(f"started {service_name} on {osd_host}", verbose)
-
-
-def osd_out(osd_id, verbose):
-    """Immediately mark OSD out via local ceph CLI (--force-out mode)."""
-    r = run_local(f"sudo ceph osd out osd.{osd_id}", verbose)
-    if r.returncode != 0:
-        print(f"ERROR: ceph osd out osd.{osd_id} failed:\n{r.stderr}", file=sys.stderr)
-        sys.exit(1)
-    vlog(f"osd.{osd_id} marked out (force)", verbose)
-
-
-def osd_in(osd_id, verbose):
-    """Mark OSD back in via local ceph CLI."""
-    r = run_local(f"sudo ceph osd in osd.{osd_id}", verbose)
-    if r.returncode != 0:
-        print(f"WARNING: ceph osd in osd.{osd_id} failed:\n{r.stderr}", file=sys.stderr)
-    else:
-        vlog(f"osd.{osd_id} marked in", verbose)
-
-
-# ---------------------------------------------------------------------------
-# Journal streaming
-# ---------------------------------------------------------------------------
-
-def start_journal_stream(tail_lines, verbose):
-    """
-    SSH to node0 and follow the ceph-mon journal in ISO format.
-    Returns Popen proc; read from proc.stdout.
-    """
-    remote_cmd = (
-        f"journalctl -u 'ceph*mon*' --follow --output short-iso -n {tail_lines}"
-    )
-    vlog(f"journal stream: ssh {MON_HOST} '{remote_cmd}'", verbose)
-    return subprocess.Popen(
-        ["ssh", *SSH_OPTS, MON_HOST, remote_cmd],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        text=True,
-        bufsize=1,
-    )
-
-
-def stop_journal_stream(proc):
-    try:
-        proc.terminate()
-        proc.wait(timeout=5)
-    except Exception:
-        try:
-            proc.kill()
-        except Exception:
-            pass
-
-
-# ---------------------------------------------------------------------------
-# Recovery detection
-# ---------------------------------------------------------------------------
-
-def watch_journal(proc, osd_id, timeout, grace_period_mode, verbose):
-    """
-    Read journal lines and return timing milestones as a dict.
-    Each value is (datetime_utc | None, raw_ts_str | None).
-
-    Keys: marked_out, degraded, recovering, healthy
-    """
-    deadline = datetime.now(timezone.utc) + timedelta(seconds=timeout)
-
-    results   = {k: (None, None) for k in ("down", "marked_out", "degraded", "recovering", "healthy")}
-    found     = {k: False        for k in results}
-
-    if grace_period_mode:
-        vlog(f"waiting for mon to auto-mark osd.{osd_id} out "
-             f"(mon_osd_down_out_interval ≈ 600 s) ...", verbose)
-
-    next_status_poll = 0.0
-    while True:
-        if datetime.now(timezone.utc) > deadline:
-            print(f"Timeout ({timeout}s) reached.", file=sys.stderr)
-            break
-
-        now = time.monotonic()
-        if now >= next_status_poll:
-            status = ceph_pgmap_state(verbose)
-            next_status_poll = now + 2.0
-            if status is not None:
-                has_degraded, has_recovery, status_clean = status
-                status_dt = datetime.now(timezone.utc)
-                status_ts = status_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-                if not found["degraded"] and has_degraded:
-                    results["degraded"] = (status_dt, status_ts)
-                    found["degraded"] = True
-                    vlog(f"  → degraded (ceph status): {status_ts}", verbose)
-                if not found["recovering"] and has_recovery:
-                    results["recovering"] = (status_dt, status_ts)
-                    found["recovering"] = True
-                    vlog(f"  → recovering (ceph status): {status_ts}", verbose)
-                if (found["degraded"] or found["recovering"]) and not found["healthy"] and status_clean:
-                    results["healthy"] = (status_dt, status_ts)
-                    found["healthy"] = True
-                    vlog(f"  → all pgs active+clean (ceph status): {status_ts}", verbose)
-                    break
-
-        ready, _, _ = select.select([proc.stdout], [], [], 0.5)
-        if not ready:
-            continue
-        raw = proc.stdout.readline()
-        if raw == "":
-            break
-
-        line = raw.rstrip()
-        if not line:
-            continue
-
-        vlog(f"  {line}", verbose)
-
-        dt, ts = parse_journal_ts(line)
-
-        # Detect OSD going down ("osd.3 marked itself down and dead")
-        if not found["down"] and OSD_DOWN_RE.search(line) and f"osd.{osd_id}" in line:
-            results["down"] = (dt, ts)
-            found["down"] = True
-            vlog(f"  → osd.{osd_id} down: {ts}", verbose)
-
-        # Detect marked_out (auto: "Marking osd.3 out ..." or manual: "osd.3 marked out")
-        if not found["marked_out"] and MARKED_OUT_RE.search(line) and f"osd.{osd_id}" in line:
-            results["marked_out"] = (dt, ts)
-            found["marked_out"] = True
-            vlog(f"  → osd.{osd_id} marked out: {ts}", verbose)
-
-        # Detect pgmap state transitions
-        pg = pgmap_state(line)
-        if pg is not None:
-            total_pgs, summary = pg
-
-            if not found["degraded"] and DEGRADED_RE.search(summary):
-                results["degraded"] = (dt, ts)
-                found["degraded"] = True
-                vlog(f"  → degraded ({summary}): {ts}", verbose)
-
-            if not found["recovering"] and RECOVERING_RE.search(summary):
-                results["recovering"] = (dt, ts)
-                found["recovering"] = True
-                vlog(f"  → recovering ({summary}): {ts}", verbose)
-
-            if (found["degraded"] or found["recovering"]) and not found["healthy"]:
-                if all_clean(total_pgs, summary):
-                    results["healthy"] = (dt, ts)
-                    found["healthy"] = True
-                    vlog(f"  → all pgs active+clean: {ts}", verbose)
-                    break
-
-    return results
-
-
-# ---------------------------------------------------------------------------
-# Argument parsing
-# ---------------------------------------------------------------------------
-
-def parse_args():
-    p = argparse.ArgumentParser(
-        description="Measure Ceph OSD recovery time.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=__doc__,
-    )
-    p.add_argument("osd_id", type=int, help="OSD ID to take out (e.g. 3)")
-    p.add_argument(
-        "--force-out", action="store_true",
-        help="Skip grace period: use `ceph osd out` immediately instead of "
-             "stopping the daemon (default: stop daemon, wait for auto-markout)",
-    )
-    p.add_argument(
-        "--timeout", type=int, default=7200,
-        help="Abort after this many seconds (default: 7200; allows for 600 s "
-             "grace period + up to ~1.5 h recovery)",
-    )
-    p.add_argument(
-        "--no-restore", action="store_true",
-        help="Do NOT restart daemon / mark OSD back in after measurement",
-    )
-    p.add_argument(
-        "--tail-lines", type=int, default=30,
-        help="Lines of journal backlog to read before following (default: 30)",
-    )
-    p.add_argument("--verbose", "-v", action="store_true")
-    return p.parse_args()
-
-
-# ---------------------------------------------------------------------------
-# main
-# ---------------------------------------------------------------------------
+        while time.monotonic()<deadline and not (stop_event and stop_event.is_set()):
+            s=recovery_snapshot(osd_id); stamp=s['observed_utc']; o=s['osd']
+            if raw: raw.write(json.dumps(s)+'\n');raw.flush()
+            for key,condition in [('down',not o['up']),('marked_out',not o['in']),('degraded',s['degraded']),('recovering',s['recovering'])]:
+                if condition and events[key] is None: events[key]=stamp
+            target_ok=(o['up'] and o['in']) if require_restored else (not o['up'] and not o['in'] and events['down'] is not None)
+            if target_ok and s['all_clean']:
+                events['healthy']=stamp
+                return {'events':events,'complete':True,'poll_interval_s':interval}
+            if stop_event: stop_event.wait(interval)
+            else: time.sleep(interval)
+        return {'events':events,'complete':False,'poll_interval_s':interval}
+    finally:
+        if raw:raw.close()
 
 def main():
-    args = parse_args()
-    osd_id   = args.osd_id
-    verbose  = args.verbose
-    force_out = args.force_out
-
-    osd_host, service_name = find_osd_info(osd_id, verbose)
-
-    # Start journal stream BEFORE taking the OSD out so we don't miss events
-    journal_proc = start_journal_stream(args.tail_lines, verbose)
-    time.sleep(1.5)  # let SSH + journalctl connect and start streaming
-
-    t_stop_wall = datetime.now(timezone.utc)
-
-    if force_out:
-        osd_out(osd_id, verbose)
-    else:
-        stop_osd_daemon(osd_id, osd_host, service_name, verbose)
-        vlog(
-            f"OSD daemon stopped. Mon will mark osd.{osd_id} out after grace period "
-            f"(mon_osd_down_out_interval). Waiting ...",
-            verbose,
-        )
-
+    p=argparse.ArgumentParser(description=__doc__)
+    p.add_argument('osd_id',type=int);p.add_argument('--confirm-fault',action='store_true',required=True)
+    p.add_argument('--timeout',type=float,default=7200);p.add_argument('--poll-interval',type=float,default=2)
+    p.add_argument('--no-restore',action='store_true');a=p.parse_args()
+    if a.osd_id<0 or a.timeout<=0 or a.poll_interval<=0:p.error('Invalid OSD ID or timing')
+    host,unit=find_osd_info(a.osd_id)
+    baseline=recovery_snapshot(a.osd_id)
+    if not baseline['all_clean'] or not baseline['osd']['up'] or not baseline['osd']['in']:raise RuntimeError('Require clean cluster and up/in target')
+    attempted=False
     try:
-        events = watch_journal(
-            journal_proc, osd_id, args.timeout,
-            grace_period_mode=not force_out,
-            verbose=verbose,
-        )
+        attempted=True;stop_osd_daemon(a.osd_id,host,unit)
+        print(json.dumps(watch_recovery(a.osd_id,a.timeout,a.poll_interval,raw_path='recovery-events.jsonl'),indent=2))
     finally:
-        if not args.no_restore:
-            if not force_out:
-                start_osd_daemon(osd_host, service_name, verbose)
-            # Mark OSD in regardless of mode (auto-markout doesn't auto-mark-in)
-            osd_in(osd_id, verbose)
-        stop_journal_stream(journal_proc)
-
-    # -----------------------------------------------------------------------
-    # Compute durations
-    # -----------------------------------------------------------------------
-    def secs(dt0, dt1):
-        if dt0 is not None and dt1 is not None:
-            return round((dt1 - dt0).total_seconds(), 1)
-        return None
-
-    down_dt,        down_ts        = events["down"]
-    marked_out_dt,  marked_out_ts  = events["marked_out"]
-    degraded_dt,    degraded_ts    = events["degraded"]
-    recovering_dt,  recovering_ts  = events["recovering"]
-    healthy_dt,     healthy_ts     = events["healthy"]
-
-    t_start_dt = degraded_dt or recovering_dt
-    t_start_ts = degraded_ts or recovering_ts
-
-    # Grace period: from OSD going down to mon marking it out.
-    # Fall back to t_stop_wall if t_down wasn't captured.
-    grace_ref_dt = down_dt or (t_stop_wall if not force_out else None)
-
-    result = {
-        "osd_id":    osd_id,
-        "mode":      "force-out" if force_out else "grace-period",
-        # --- timestamps (raw journal strings, local timezone of node0) ---
-        "t_stop_wall":   t_stop_wall.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "t_down":        down_ts,
-        "t_marked_out":  marked_out_ts,
-        "t_degraded":    degraded_ts,
-        "t_recovering":  recovering_ts,
-        "t_healthy":     healthy_ts,
-        # --- durations (seconds) ---
-        # grace period: OSD down → mon marks it out (should be ≈600 s)
-        "duration_grace_period_s":      secs(grace_ref_dt, marked_out_dt) if not force_out else None,
-        # time from marked-out to data movement starting
-        "duration_out_to_recovering_s": secs(marked_out_dt, recovering_dt),
-        # actual data movement window (recovering → healthy)
-        "duration_recovery_s":          secs(recovering_dt, healthy_dt),
-        # full window from first degradation to healthy
-        "duration_total_s":             secs(t_start_dt, healthy_dt),
-    }
-
-    print(json.dumps(result, indent=2))
-
-
-if __name__ == "__main__":
-    main()
+        if attempted and not a.no_restore:
+            start_osd_daemon(host,unit);osd_in(a.osd_id)
+            restored=watch_recovery(a.osd_id,a.timeout,a.poll_interval,raw_path='restoration-events.jsonl',require_restored=True)
+            if not restored['complete']:raise RuntimeError('Restoration timed out')
+if __name__=='__main__':main()

@@ -18,6 +18,7 @@
 #include <thread>
 #include <iomanip>
 #include <vector>
+#include <cstdint>
 
 #include "adios2.h"
 
@@ -29,15 +30,15 @@ struct PerformanceMetrics {
     double computation_time = 0.0;
     double initialization_time = 0.0;
     size_t total_steps = 0;
-    size_t total_data_read_mb = 0;
-    size_t total_data_written_mb = 0;
+    uint64_t total_data_read_bytes = 0;
+    uint64_t total_data_written_bytes = 0;
     
     // Per-step timing for CSV output
     std::vector<double> step_read_times;
     std::vector<double> step_write_times;
     std::vector<double> step_compute_times;
-    std::vector<size_t> step_data_read_bytes;
-    std::vector<size_t> step_data_written_bytes;
+    std::vector<uint64_t> step_data_read_bytes;
+    std::vector<uint64_t> step_data_written_bytes;
     
     void print_summary(int rank, int comm_size) {
         if (rank == 0) {
@@ -49,14 +50,14 @@ struct PerformanceMetrics {
             std::cout << "Computation time:         " << computation_time << " seconds" << std::endl;
             std::cout << "I/O write time:           " << io_write_time << " seconds" << std::endl;
             std::cout << "Total steps processed:    " << total_steps << std::endl;
-            std::cout << "Data read (MB):           " << total_data_read_mb << std::endl;
-            std::cout << "Data written (MB):        " << total_data_written_mb << std::endl;
+            std::cout << "Data read (bytes):           " << total_data_read_bytes << std::endl;
+            std::cout << "Data written (bytes):        " << total_data_written_bytes << std::endl;
             std::cout << "Processes used:           " << comm_size << std::endl;
             
             if (total_steps > 0) {
                 std::cout << "Average time per step:    " << (total_time - initialization_time) / total_steps << " seconds" << std::endl;
-                std::cout << "Read throughput:          " << (total_data_read_mb / io_read_time) << " MB/s" << std::endl;
-                std::cout << "Write throughput:         " << (total_data_written_mb / io_write_time) << " MB/s" << std::endl;
+                std::cout << "Read phase rate:          " << (total_data_read_bytes / (1024.0 * 1024.0) / io_read_time) << " MiB/s" << std::endl;
+                std::cout << "Write phase rate:         " << (total_data_written_bytes / (1024.0 * 1024.0) / io_write_time) << " MiB/s" << std::endl;
             }
             std::cout << "===========================\n" << std::endl;
         }
@@ -374,7 +375,7 @@ int main(int argc, char *argv[])
             
             // Calculate data size read (U + V arrays)
             size_t data_size_bytes = (u.size() + v.size()) * sizeof(double);
-            perf_metrics.total_data_read_mb += data_size_bytes / (1024 * 1024);
+            perf_metrics.total_data_read_bytes += data_size_bytes;
             perf_metrics.step_data_read_bytes.push_back(data_size_bytes);
 
             if (!rank)
@@ -449,7 +450,7 @@ int main(int argc, char *argv[])
             if (write_inputvars) {
                 write_size_bytes += (u.size() + v.size()) * sizeof(double);
             }
-            perf_metrics.total_data_written_mb += write_size_bytes / (1024 * 1024);
+            perf_metrics.total_data_written_bytes += write_size_bytes;
             perf_metrics.step_data_written_bytes.push_back(write_size_bytes);
             
             ++stepAnalysis;
@@ -470,19 +471,37 @@ int main(int argc, char *argv[])
                            perf_metrics.io_read_time, perf_metrics.computation_time, 
                            perf_metrics.io_write_time};
     double max_times[5], min_times[5], avg_times[5];
-    size_t total_data[2] = {perf_metrics.total_data_read_mb, perf_metrics.total_data_written_mb};
-    size_t sum_data[2];
+    uint64_t total_data[2] = {perf_metrics.total_data_read_bytes, perf_metrics.total_data_written_bytes};
+    uint64_t sum_data[2];
     
     MPI_Allreduce(total_times, max_times, 5, MPI_DOUBLE, MPI_MAX, comm);
     MPI_Allreduce(total_times, min_times, 5, MPI_DOUBLE, MPI_MIN, comm);
     MPI_Allreduce(total_times, avg_times, 5, MPI_DOUBLE, MPI_SUM, comm);
-    MPI_Allreduce(total_data, sum_data, 2, MPI_UNSIGNED_LONG, MPI_SUM, comm);
+    MPI_Allreduce(total_data, sum_data, 2, MPI_UINT64_T, MPI_SUM, comm);
     
     // Calculate averages
     for (int i = 0; i < 5; i++) {
         avg_times[i] /= comm_size;
     }
     
+    // CSV uses global byte sums and maximum rank phase times for each step.
+    // These are phase metrics, not end-to-end storage bandwidth or I/O latency.
+    uint64_t steps_local = perf_metrics.step_read_times.size(), steps_min, steps_max;
+    MPI_Allreduce(&steps_local, &steps_min, 1, MPI_UINT64_T, MPI_MIN, comm);
+    MPI_Allreduce(&steps_local, &steps_max, 1, MPI_UINT64_T, MPI_MAX, comm);
+    if (steps_min != steps_max) {
+        if (!rank) std::cerr << "Mismatched processed step counts across ranks" << std::endl;
+        MPI_Abort(comm, 2);
+    }
+    const int step_count = static_cast<int>(steps_local);
+    std::vector<double> global_read_times(step_count), global_write_times(step_count), global_compute_times(step_count);
+    std::vector<uint64_t> global_read_bytes(step_count), global_write_bytes(step_count);
+    MPI_Reduce(perf_metrics.step_read_times.data(), global_read_times.data(), step_count, MPI_DOUBLE, MPI_MAX, 0, comm);
+    MPI_Reduce(perf_metrics.step_write_times.data(), global_write_times.data(), step_count, MPI_DOUBLE, MPI_MAX, 0, comm);
+    MPI_Reduce(perf_metrics.step_compute_times.data(), global_compute_times.data(), step_count, MPI_DOUBLE, MPI_MAX, 0, comm);
+    MPI_Reduce(perf_metrics.step_data_read_bytes.data(), global_read_bytes.data(), step_count, MPI_UINT64_T, MPI_SUM, 0, comm);
+    MPI_Reduce(perf_metrics.step_data_written_bytes.data(), global_write_bytes.data(), step_count, MPI_UINT64_T, MPI_SUM, 0, comm);
+
     // Print detailed performance summary
     if (!rank) {
         std::cout << "\n=== Detailed Performance Summary ===" << std::endl;
@@ -496,14 +515,14 @@ int main(int argc, char *argv[])
         std::cout << "I/O write time (s)        | " << std::setw(8) << max_times[4] << " | " << std::setw(8) << min_times[4] << " | " << std::setw(8) << avg_times[4] << " |" << std::endl;
         std::cout << "=====================================" << std::endl;
         std::cout << "Total steps processed:    " << perf_metrics.total_steps << std::endl;
-        std::cout << "Total data read (MB):     " << sum_data[0] << std::endl;
-        std::cout << "Total data written (MB):  " << sum_data[1] << std::endl;
+        std::cout << "Total data read (bytes):     " << sum_data[0] << std::endl;
+        std::cout << "Total data written (bytes):  " << sum_data[1] << std::endl;
         std::cout << "Processes used:           " << comm_size << std::endl;
         
         if (perf_metrics.total_steps > 0 && avg_times[2] > 0 && avg_times[4] > 0) {
             std::cout << "Average time per step:    " << (avg_times[0] - avg_times[1]) / perf_metrics.total_steps << " seconds" << std::endl;
-            std::cout << "Read throughput:          " << (sum_data[0] / avg_times[2]) << " MB/s" << std::endl;
-            std::cout << "Write throughput:         " << (sum_data[1] / avg_times[4]) << " MB/s" << std::endl;
+            std::cout << "Read phase rate:          " << (sum_data[0] / (1024.0 * 1024.0) / max_times[2]) << " MiB/s" << std::endl;
+            std::cout << "Write phase rate:         " << (sum_data[1] / (1024.0 * 1024.0) / max_times[4]) << " MiB/s" << std::endl;
         }
         std::cout << "=====================================" << std::endl;
         
@@ -514,18 +533,18 @@ int main(int argc, char *argv[])
             std::ofstream csv_file(csv_filename);
             if (csv_file.is_open())
             {
-                csv_file << "step,read_time_sec,compute_time_sec,write_time_sec,data_read_mb,data_written_mb,read_throughput_mb_s,write_throughput_mb_s,cumulative_read_time,cumulative_write_time\n";
+                csv_file << "step,max_rank_read_time_sec,max_rank_compute_time_sec,max_rank_write_time_sec,global_data_read_mib,global_data_written_mib,global_read_phase_mib_s,global_write_phase_mib_s,cumulative_read_time,cumulative_write_time,global_data_read_bytes,global_data_written_bytes\n";
                 
                 double cumulative_read_time = 0.0;
                 double cumulative_write_time = 0.0;
                 
                 for (size_t i = 0; i < perf_metrics.step_read_times.size(); ++i)
                 {
-                    double read_time = perf_metrics.step_read_times[i];
-                    double compute_time = perf_metrics.step_compute_times[i];
-                    double write_time = perf_metrics.step_write_times[i];
-                    double data_read_mb = perf_metrics.step_data_read_bytes[i] / (1024.0 * 1024.0);
-                    double data_written_mb = perf_metrics.step_data_written_bytes[i] / (1024.0 * 1024.0);
+                    double read_time = global_read_times[i];
+                    double compute_time = global_compute_times[i];
+                    double write_time = global_write_times[i];
+                    double data_read_mb = global_read_bytes[i] / (1024.0 * 1024.0);
+                    double data_written_mb = global_write_bytes[i] / (1024.0 * 1024.0);
                     double read_throughput = (read_time > 0) ? (data_read_mb / read_time) : 0.0;
                     double write_throughput = (write_time > 0) ? (data_written_mb / write_time) : 0.0;
                     
@@ -542,7 +561,9 @@ int main(int argc, char *argv[])
                              << read_throughput << ","
                              << write_throughput << ","
                              << cumulative_read_time << ","
-                             << cumulative_write_time << "\n";
+                             << cumulative_write_time << ","
+                             << global_read_bytes[i] << ","
+                             << global_write_bytes[i] << "\n";
                 }
                 csv_file.close();
                 std::cout << "\n📊 Per-step throughput data saved to: " << csv_filename << std::endl;
